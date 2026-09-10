@@ -5,10 +5,8 @@ from PIL import Image
 import os
 import threading
 
-# Import các module của team
 import filters
 import metrics
-
 
 # Thiết lập Theme
 ctk.set_appearance_mode("dark")
@@ -24,7 +22,8 @@ class ImageProcessingApp(ctk.CTk):
         self.original_image = None
         self.processed_image = None
         self.video_playing = False
-        self.process_job = None
+        self.process_job = None  
+        self.batch_preview_job = None
         
         self.clean_image = None
         self.damaged_image = None
@@ -69,18 +68,16 @@ class ImageProcessingApp(ctk.CTk):
         self.lbl_gamma_val = ctk.CTkLabel(self.t1_slider_frame, text="Chỉnh Gamma: 1.00", font=("Arial", 13, "bold"), text_color="#5CE1E6")
         self.gamma_slider = ctk.CTkSlider(self.t1_slider_frame, from_=0.1, to=5.0, command=self.on_slider_change_t1)
         self.gamma_slider.set(1.0)
-        
         self.lbl_bit_val = ctk.CTkLabel(self.t1_slider_frame, text="Chỉnh Bit (0-7): 7", font=("Arial", 13, "bold"), text_color="#5CE1E6")
         self.bit_slider = ctk.CTkSlider(self.t1_slider_frame, from_=0, to=7, number_of_steps=7, command=self.on_slider_change_t1)
         self.bit_slider.set(7)
 
-        metrics_box = ctk.CTkFrame(sidebar_frame, corner_radius=10, fg_color="#2A2D30", border_width=1, border_color="#3D3D3D")
-        metrics_box.pack(pady=20, padx=20, fill="x")
+        self.metrics_box = ctk.CTkFrame(sidebar_frame, corner_radius=10, fg_color="#2A2D30", border_width=1, border_color="#3D3D3D")
         
-        ctk.CTkLabel(metrics_box, text="Quality Indicators", text_color="gray").pack(pady=(10, 5))
-        self.lbl_psnr = ctk.CTkLabel(metrics_box, text="PSNR: --", font=("Arial", 16, "bold"), text_color="#5CE1E6")
+        ctk.CTkLabel(self.metrics_box, text="Quality Indicators", text_color="gray").pack(pady=(10, 5))
+        self.lbl_psnr = ctk.CTkLabel(self.metrics_box, text="PSNR: --", font=("Arial", 16, "bold"), text_color="#5CE1E6")
         self.lbl_psnr.pack(pady=2)
-        self.lbl_ssim = ctk.CTkLabel(metrics_box, text="SSIM: --", font=("Arial", 16, "bold"), text_color="#5CE1E6")
+        self.lbl_ssim = ctk.CTkLabel(self.metrics_box, text="SSIM: --", font=("Arial", 16, "bold"), text_color="#5CE1E6")
         self.lbl_ssim.pack(pady=(2, 15))
 
         display_frame = ctk.CTkFrame(self.tab_single, fg_color="transparent")
@@ -110,13 +107,16 @@ class ImageProcessingApp(ctk.CTk):
         self.gamma_slider.pack_forget()
         self.lbl_bit_val.pack_forget()
         self.bit_slider.pack_forget()
+        self.metrics_box.pack_forget() 
 
         if f == "gamma":
             self.lbl_gamma_val.pack(pady=(0, 5), fill="x")
             self.gamma_slider.pack(pady=(0, 15), fill="x")
+            self.metrics_box.pack(pady=20, padx=20, fill="x")
         elif f == "bitplane":
             self.lbl_bit_val.pack(pady=(0, 5), fill="x")
             self.bit_slider.pack(pady=(0, 15), fill="x")
+            self.metrics_box.pack(pady=20, padx=20, fill="x")
 
     def load_single_image(self):
         filepath = filedialog.askopenfilename(filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp")])
@@ -159,8 +159,11 @@ class ImageProcessingApp(ctk.CTk):
                 self.processed_image = filters.apply_bit_plane_slicing(self.original_image, bit=int(self.bit_slider.get()))
 
             self.display_cv_image(self.processed_image, self.lbl_proc_img)
-            self.lbl_psnr.configure(text=f"PSNR: {metrics.calc_psnr(self.original_image, self.processed_image):.2f}")
-            self.lbl_ssim.configure(text=f"SSIM: {metrics.calc_ssim(self.original_image, self.processed_image):.4f}")
+            
+            if f_type in ["gamma", "bitplane"]:
+                self.lbl_psnr.configure(text=f"PSNR: {metrics.calc_psnr(self.original_image, self.processed_image):.2f}")
+                self.lbl_ssim.configure(text=f"SSIM: {metrics.calc_ssim(self.original_image, self.processed_image):.4f}")
+
         except Exception as e:
             print(f"Lỗi: {e}")
 
@@ -174,18 +177,18 @@ class ImageProcessingApp(ctk.CTk):
         self.filter_var_t2 = ctk.StringVar(value="negative")
         filters_list = ["negative", "log", "gamma", "bitplane"]
         ctk.CTkOptionMenu(sidebar_t2, variable=self.filter_var_t2, values=filters_list, 
-                          height=35, command=self.update_slider_visibility_t2).pack(pady=10, padx=20, fill="x")
+                          height=35, command=self.on_filter_select_t2).pack(pady=10, padx=20, fill="x")
 
         self.t2_slider_frame = ctk.CTkFrame(sidebar_t2, fg_color="transparent")
         self.t2_slider_frame.pack(fill="x", padx=20)
         
-        self.gamma_slider_t2 = ctk.CTkSlider(self.t2_slider_frame, from_=0.1, to=5.0)
+        self.gamma_slider_t2 = ctk.CTkSlider(self.t2_slider_frame, from_=0.1, to=5.0, command=self.on_slider_change_t2)
         self.gamma_slider_t2.set(1.0)
-        self.lbl_gamma_val_t2 = ctk.CTkLabel(self.t2_slider_frame, text="Gamma (kéo để chỉnh)", text_color="#5CE1E6")
+        self.lbl_gamma_val_t2 = ctk.CTkLabel(self.t2_slider_frame, text="Chỉnh Gamma: 1.00", font=("Arial", 13, "bold"), text_color="#5CE1E6")
         
-        self.bit_slider_t2 = ctk.CTkSlider(self.t2_slider_frame, from_=0, to=7, number_of_steps=7)
+        self.bit_slider_t2 = ctk.CTkSlider(self.t2_slider_frame, from_=0, to=7, number_of_steps=7, command=self.on_slider_change_t2)
         self.bit_slider_t2.set(7)
-        self.lbl_bit_val_t2 = ctk.CTkLabel(self.t2_slider_frame, text="Bitplane (0-7)", text_color="#5CE1E6")
+        self.lbl_bit_val_t2 = ctk.CTkLabel(self.t2_slider_frame, text="Chỉnh Bit (0-7): 7", font=("Arial", 13, "bold"), text_color="#5CE1E6")
 
         self.update_slider_visibility_t2()
 
@@ -193,18 +196,43 @@ class ImageProcessingApp(ctk.CTk):
         main_t2.pack(side="right", expand=True, fill="both")
         
         btn_frame = ctk.CTkFrame(main_t2, fg_color="transparent")
-        btn_frame.pack(pady=(20, 10))
+        btn_frame.pack(side="top", pady=(20, 10))
         
-        ctk.CTkButton(btn_frame, text="Chọn nhiều Ảnh để xử lý", width=250, height=45, corner_radius=8, font=("Arial", 14, "bold"), 
-                      command=self.run_batch).pack(side="left", padx=15)
-        self.btn_video = ctk.CTkButton(btn_frame, text="Chọn Video để xử lý", width=250, height=45, corner_radius=8, font=("Arial", 14, "bold"), 
+        ctk.CTkButton(btn_frame, text="Chọn Ảnh", width=180, height=45, corner_radius=8, font=("Arial", 14, "bold"), 
+                      command=self.select_batch_images).pack(side="left", padx=10)
+
+        self.btn_video = ctk.CTkButton(btn_frame, text="Chọn Video để xử lý", width=200, height=45, corner_radius=8, font=("Arial", 14, "bold"), 
                       command=self.play_video)
-        self.btn_video.pack(side="left", padx=15)
+        self.btn_video.pack(side="left", padx=10)
         
-        video_frame = ctk.CTkFrame(main_t2, corner_radius=10, fg_color="#1E1E1E", border_width=1, border_color="#3A3A3A")
-        video_frame.pack(expand=True, fill="both", padx=30, pady=20)
-        self.lbl_video = ctk.CTkLabel(video_frame, text="Màn hình hiển thị Video", text_color="gray", font=("Arial", 16))
-        self.lbl_video.pack(expand=True)
+        self.bottom_action_frame = ctk.CTkFrame(main_t2, fg_color="transparent", height=45)
+        self.bottom_action_frame.pack(side="bottom", fill="x", pady=(0, 20))
+        self.bottom_action_frame.pack_propagate(False)
+        
+        self.btn_process_batch = ctk.CTkButton(self.bottom_action_frame, text="Lưu kết quả", width=250, height=45, corner_radius=8, font=("Arial", 14, "bold"), 
+                      command=self.run_batch, fg_color="#2B5B84", hover_color="#1E4363")
+        self.btn_process_batch.pack_forget()
+        
+        self.batch_preview_frame = ctk.CTkFrame(main_t2, corner_radius=10, fg_color="#1E1E1E", border_width=1, border_color="#3A3A3A")
+        self.batch_preview_frame.pack(side="top", expand=True, fill="both", padx=30, pady=(10, 20))
+        self.batch_preview_frame.pack_propagate(False)
+
+        self.grid_container = ctk.CTkFrame(self.batch_preview_frame, fg_color="transparent")
+        
+        self.lbl_batch_status = ctk.CTkLabel(self.batch_preview_frame, text="Chưa chọn ảnh nào.", text_color="gray", font=("Arial", 16))
+        self.lbl_batch_status.place(relx=0.5, rely=0.5, anchor="center")
+
+        self.batch_filepaths = []
+        self.batch_image_widgets = []
+
+    def on_filter_select_t2(self, value=None):
+        self.update_slider_visibility_t2()
+        self.schedule_batch_preview()
+
+    def on_slider_change_t2(self, value=None):
+        self.lbl_gamma_val_t2.configure(text=f"Chỉnh Gamma: {self.gamma_slider_t2.get():.2f}")
+        self.lbl_bit_val_t2.configure(text=f"Chỉnh Bit (0-7): {int(self.bit_slider_t2.get())}")
+        self.schedule_batch_preview()
 
     def update_slider_visibility_t2(self, value=None):
         f = self.filter_var_t2.get()
@@ -220,11 +248,109 @@ class ImageProcessingApp(ctk.CTk):
             self.lbl_bit_val_t2.pack(pady=(5, 0))
             self.bit_slider_t2.pack(pady=(0, 10), fill="x")
 
-    def run_batch(self):
-        filepaths = filedialog.askopenfilenames(title="Chọn các ảnh cần xử lý (Có thể chọn nhiều)",
-                                                filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp")])
-        if not filepaths: return
+    def schedule_batch_preview(self):
+        if self.batch_preview_job:
+            self.after_cancel(self.batch_preview_job)
+        if self.video_playing: return
+        self.batch_preview_job = self.after(150, self.update_batch_preview)
+
+    def apply_filter_to_img(self, img, f_type, g_val, b_val):
+        try:
+            if f_type == "negative": return filters.apply_negative(img)
+            elif f_type == "log": return filters.apply_log_transform(img)
+            elif f_type == "gamma": return filters.apply_gamma_transform(img, gamma=g_val)
+            elif f_type == "bitplane": return filters.apply_bit_plane_slicing(img, bit=b_val)
+        except Exception:
+            pass
+        return img
+
+    def update_batch_preview(self):
+        if not hasattr(self, 'batch_filepaths') or not self.batch_filepaths or self.video_playing: 
+            return
+            
+        f_type = self.filter_var_t2.get()
+        g_val = self.gamma_slider_t2.get()
+        b_val = int(self.bit_slider_t2.get())
         
+        num_images = len(self.batch_filepaths)
+        preview_limit = min(num_images, 12)
+        
+        if num_images == 1:
+            img = cv2.imread(self.batch_filepaths[0])
+            if img is not None:
+                p_img = self.apply_filter_to_img(img, f_type, g_val, b_val)
+                self.display_cv_image(p_img, self.lbl_batch_status, size=(900, 600))
+        else:
+            for index in range(preview_limit):
+                path = self.batch_filepaths[index]
+                if index >= len(self.batch_image_widgets): break
+                
+                img = cv2.imread(path)
+                if img is None: continue
+                
+                p_img = self.apply_filter_to_img(img, f_type, g_val, b_val)
+                frame = self.batch_image_widgets[index]
+                lbl = frame.winfo_children()[0] 
+                self.display_cv_image(p_img, lbl, size=(230, 230))
+
+    def select_batch_images(self):
+        filepaths = filedialog.askopenfilenames(title="Chọn các ảnh cần xử lý",
+                                                filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp")])
+        if not filepaths: 
+            return
+            
+        self.batch_filepaths = list(filepaths)
+        self.btn_process_batch.pack(anchor="center")
+        
+        for widget in self.batch_image_widgets:
+            widget.destroy()
+        self.batch_image_widgets.clear()
+
+        num_images = len(self.batch_filepaths)
+        preview_limit = min(num_images, 12) 
+        
+        if num_images == 1:
+            self.grid_container.place_forget()
+            self.lbl_batch_status.place(relx=0.5, rely=0.5, anchor="center")
+            self.lbl_batch_status.configure(text="Đang áp dụng...", image="")
+        else:
+            self.lbl_batch_status.place_forget()
+            self.grid_container.place(relx=0.5, rely=0.5, anchor="center")
+            
+            columns = min(3, num_images)
+            for i in range(10): 
+                self.grid_container.grid_columnconfigure(i, weight=0)
+                self.grid_container.grid_rowconfigure(i, weight=0)
+                
+            for i in range(columns): 
+                self.grid_container.grid_columnconfigure(i, weight=1)
+                
+            num_rows = (preview_limit + columns - 1) // columns
+            for i in range(num_rows):
+                self.grid_container.grid_rowconfigure(i, weight=1)
+
+            for index in range(preview_limit):
+                path = self.batch_filepaths[index]
+                frame = ctk.CTkFrame(self.grid_container, fg_color="transparent")
+                row = index // columns
+                col = index % columns
+                frame.grid(row=row, column=col, padx=15, pady=15)
+                
+                lbl = ctk.CTkLabel(frame, text="Đang xử lý...")
+                lbl.pack(expand=True)
+                
+                name_lbl = ctk.CTkLabel(frame, text=os.path.basename(path)[:20] + "...", font=("Arial", 11))
+                name_lbl.pack(pady=(5,0))
+                
+                self.batch_image_widgets.append(frame)
+                
+        self.update_batch_preview()
+
+    def run_batch(self):
+        if self.video_playing or not self.batch_filepaths:
+            messagebox.showwarning("Cảnh báo", "Vui lòng chọn ảnh để sử dụng tính năng này!")
+            return
+            
         out_dir = filedialog.askdirectory(title="Chọn thư mục để Lưu kết quả")
         if not out_dir: return
 
@@ -233,7 +359,7 @@ class ImageProcessingApp(ctk.CTk):
         b_val = int(self.bit_slider_t2.get())
         count = 0
 
-        for path in filepaths:
+        for path in self.batch_filepaths:
             img = cv2.imread(path)
             if img is None: continue
             
@@ -249,34 +375,49 @@ class ImageProcessingApp(ctk.CTk):
         messagebox.showinfo("Hoàn Tất", f"Đã xử lý và lưu thành công {count} ảnh!")
 
     def play_video(self):
+        self.btn_process_batch.pack_forget()
+        self.grid_container.place_forget()
+        self.lbl_batch_status.place(relx=0.5, rely=0.5, anchor="center")
+             
         if self.video_playing:
             self.video_playing = False
-            self.btn_video.configure(text="Chọn Video để xử lý")
+            self.btn_video.configure(text="🎬 Chọn Video để xử lý")
+            self.lbl_batch_status.configure(text="Đã dừng Video.", image="")
             return
+            
         filepath = filedialog.askopenfilename(filetypes=[("Video", "*.mp4 *.avi *.mkv")])
         if not filepath: return
         
         self.video_playing = True
         self.btn_video.configure(text="Dừng phát Video")
+        self.lbl_batch_status.configure(text="Đang phát Video...", image="")
         
         def video_thread():
+            cap = cv2.VideoCapture(filepath)
             try:
-                f_type = self.filter_var_t2.get()
-                g_val = self.gamma_slider_t2.get()
-                b_val = int(self.bit_slider_t2.get())
-                
-                gen = filters.process_video_generator(filepath, f_type, gamma=g_val, bit=b_val)
-                for frame in gen:
-                    if not self.video_playing: break
-                    self.after(0, self.display_cv_image, frame, self.lbl_video, (800, 600))
+                while self.video_playing and cap.isOpened():
+                    ret, frame = cap.read()
+                    if not ret: break
+
+                    f_type = self.filter_var_t2.get()
+                    g_val = self.gamma_slider_t2.get()
+                    b_val = int(self.bit_slider_t2.get())
+                    
+                    p_frame = self.apply_filter_to_img(frame, f_type, g_val, b_val)
+                    
+                    self.after(0, self.display_cv_image, p_frame, self.lbl_batch_status, (900, 600))
                     cv2.waitKey(33) 
-            except Exception as e: print(e)
+            except Exception as e: 
+                print(f"Lỗi Video: {e}")
             finally:
+                if cap: cap.release()
                 self.video_playing = False
-                self.after(0, lambda: self.btn_video.configure(text="🎬 Chọn Video để xử lý"))
+                self.after(0, lambda: self.btn_video.configure(text="Chọn Video để xử lý"))
+                self.after(0, lambda: self.lbl_batch_status.configure(text="Video đã kết thúc.", image=""))
+                
         threading.Thread(target=video_thread, daemon=True).start()
 
-    # TAB 3: SO SÁNH PHƯƠNG PHÁP (Yêu cầu 5 - ĐẠI TU)
+    # TAB 3: SO SÁNH PHƯƠNG PHÁP
     def setup_compare_tab(self):
         top_frame = ctk.CTkFrame(self.tab_compare, fg_color="transparent")
         top_frame.pack(fill="x", pady=10)
@@ -285,13 +426,14 @@ class ImageProcessingApp(ctk.CTk):
                       command=self.load_clean_img).pack(side="left", expand=True)
         ctk.CTkButton(top_frame, text="Tải Ảnh Hỏng (Damaged)", width=200, height=40, font=("Arial", 14, "bold"),
                       fg_color="#A33535", hover_color="#7A2424", command=self.load_damaged_img).pack(side="right", expand=True)
+
         scroll_frame = ctk.CTkScrollableFrame(self.tab_compare)
         scroll_frame.pack(expand=True, fill="both", padx=10, pady=10)
         
         row1 = ctk.CTkFrame(scroll_frame, fg_color="transparent")
         row1.pack(fill="x", pady=10)
-        self.lbl_comp_clean, _ = self.create_compare_cell(row1, "1. Ảnh Chuẩn (Clean)", has_metrics=False)
-        self.lbl_comp_dam, _ = self.create_compare_cell(row1, "2. Ảnh Hỏng (Damaged)", has_metrics=False)
+        self.lbl_comp_clean, _ = self.create_compare_cell(row1, "Ảnh Chuẩn (Clean)", has_metrics=False)
+        self.lbl_comp_dam, _ = self.create_compare_cell(row1, "Ảnh Hỏng (Damaged)", has_metrics=False)
 
         row2 = ctk.CTkFrame(scroll_frame, fg_color="transparent")
         row2.pack(fill="x", pady=10)
@@ -301,13 +443,13 @@ class ImageProcessingApp(ctk.CTk):
         row3 = ctk.CTkFrame(scroll_frame, fg_color="transparent")
         row3.pack(fill="x", pady=10)
         
-        self.lbl_comp_gam, self.met_gam, self.slide_gam = self.create_compare_cell(
-            row3, "Gamma Transform", has_slider=True, s_from=0.1, s_to=5.0, s_val=2.0, cmd=self.on_tab3_gamma)
+        self.lbl_comp_gam, self.met_gam, self.slide_gam, self.lbl_val_gam = self.create_compare_cell(
+            row3, "Gamma Transform", has_slider=True, s_from=0.1, s_to=5.0, s_val=2.0, cmd=self.on_tab3_gamma, label_prefix="Chỉnh Gamma:")
         
-        self.lbl_comp_bit, self.met_bit, self.slide_bit = self.create_compare_cell(
-            row3, "Bitplane Slicing", has_slider=True, s_from=0, s_to=7, s_val=7, cmd=self.on_tab3_bit, is_int=True)
+        self.lbl_comp_bit, self.met_bit, self.slide_bit, self.lbl_val_bit = self.create_compare_cell(
+            row3, "Bitplane Slicing", has_slider=True, s_from=0, s_to=7, s_val=7, cmd=self.on_tab3_bit, is_int=True, label_prefix="Chỉnh Bit (0-7):")
 
-    def create_compare_cell(self, parent, title, has_slider=False, has_metrics=True, s_from=0, s_to=1, s_val=0, cmd=None, is_int=False):
+    def create_compare_cell(self, parent, title, has_slider=False, has_metrics=True, s_from=0, s_to=1, s_val=0, cmd=None, is_int=False, label_prefix=""):
         cell = ctk.CTkFrame(parent, fg_color="transparent")
         cell.pack(side="left", expand=True, fill="both", padx=10)
         
@@ -319,11 +461,14 @@ class ImageProcessingApp(ctk.CTk):
         lbl_img.pack(expand=True, pady=20)
         
         slider = None
+        val_lbl = None
         if has_slider:
+            val_lbl = ctk.CTkLabel(cell, text=f"{label_prefix} {s_val:.2f}" if not is_int else f"{label_prefix} {s_val}", font=("Arial", 13, "bold"), text_color="#5CE1E6")
+            val_lbl.pack(pady=(10, 0))
             slider = ctk.CTkSlider(cell, from_=s_from, to=s_to, command=cmd)
             slider.set(s_val)
             if is_int: slider.configure(number_of_steps=s_to)
-            slider.pack(pady=(10, 0), fill="x", padx=20)
+            slider.pack(pady=(0, 10), fill="x", padx=20)
 
         met_lbl = None
         if has_metrics:
@@ -331,7 +476,7 @@ class ImageProcessingApp(ctk.CTk):
             met_lbl.pack(pady=5)
             
         if has_slider:
-            return lbl_img, met_lbl, slider
+            return lbl_img, met_lbl, slider, val_lbl
         else:
             return lbl_img, met_lbl
 
@@ -346,7 +491,6 @@ class ImageProcessingApp(ctk.CTk):
         filepath = filedialog.askopenfilename()
         if filepath:
             self.damaged_image = cv2.imread(filepath)
-
             if self.clean_image is not None:
                 h, w = self.clean_image.shape[:2]
                 self.damaged_image = cv2.resize(self.damaged_image, (w, h))
@@ -358,7 +502,6 @@ class ImageProcessingApp(ctk.CTk):
         if self.clean_image is None or processed_img is None:
             label_widget.configure(text="Thiếu ảnh Clean")
             return
-        
         try:
             psnr = metrics.calc_psnr(self.clean_image, processed_img)
             ssim = metrics.calc_ssim(self.clean_image, processed_img)
@@ -377,11 +520,17 @@ class ImageProcessingApp(ctk.CTk):
         self.display_cv_image(log_img, self.lbl_comp_log, size=(320, 320))
         self.update_metrics(log_img, self.met_log)
 
-        self.on_tab3_gamma()
+        self.on_tab3_gamma() 
         self.on_tab3_bit()
 
     def on_tab3_gamma(self, value=None):
+        if value is not None:
+            self.lbl_val_gam.configure(text=f"Chỉnh Gamma: {float(value):.2f}")
+        else:
+            self.lbl_val_gam.configure(text=f"Chỉnh Gamma: {self.slide_gam.get():.2f}")
+            
         if self.damaged_image is None: return
+        
         if self.tab3_gamma_job: self.after_cancel(self.tab3_gamma_job)
         
         def do_gamma():
@@ -392,7 +541,13 @@ class ImageProcessingApp(ctk.CTk):
         self.tab3_gamma_job = self.after(150, do_gamma)
 
     def on_tab3_bit(self, value=None):
+        if value is not None:
+            self.lbl_val_bit.configure(text=f"Chỉnh Bit (0-7): {int(float(value))}")
+        else:
+            self.lbl_val_bit.configure(text=f"Chỉnh Bit (0-7): {int(self.slide_bit.get())}")
+            
         if self.damaged_image is None: return
+        
         if self.tab3_bit_job: self.after_cancel(self.tab3_bit_job)
         
         def do_bit():
@@ -405,10 +560,19 @@ class ImageProcessingApp(ctk.CTk):
     # HÀM HỖ TRỢ HIỂN THỊ
     def display_cv_image(self, cv_img, label_widget, size=(500, 500)):
         if cv_img is None: return
-        rgb_image = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
+        
+        h, w = cv_img.shape[:2]
+        max_w, max_h = size
+        
+        ratio = min(max_w / w, max_h / h)
+        new_w = max(1, int(w * ratio))
+        new_h = max(1, int(h * ratio))
+        
+        resized_img = cv2.resize(cv_img, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
+        rgb_image = cv2.cvtColor(resized_img, cv2.COLOR_BGR2RGB)
         pil_img = Image.fromarray(rgb_image)
-        pil_img.thumbnail(size) 
-        ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=pil_img.size)
+        
+        ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(new_w, new_h))
         label_widget.configure(image=ctk_img, text="")
         label_widget.image = ctk_img 
 
