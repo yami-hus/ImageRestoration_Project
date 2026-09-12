@@ -1,8 +1,21 @@
 # %% [KHAI BÁO THƯ VIỆN]
 import cv2
 import numpy as np
-import matplotlib.pyplot as plt
 import os
+from functools import lru_cache
+
+
+_LOG_LUT = np.clip(
+    255.0 / np.log(256.0) * np.log1p(np.arange(256, dtype=np.float32)),
+    0,
+    255,
+).astype(np.uint8)
+
+
+@lru_cache(maxsize=32)
+def _gamma_lut(gamma):
+    values = 255.0 * (np.arange(256, dtype=np.float32) / 255.0) ** gamma
+    return np.clip(values, 0, 255).astype(np.uint8)
 
 # %% [HÀM ĐẢO ẢNH (NEGATIVE)]
 def apply_negative(image):
@@ -16,10 +29,7 @@ def apply_log_transform(image):
     """Thực hiện biến đổi Logarit: s = c * log(1 + r)"""
     if image is None or not isinstance(image, np.ndarray):
         raise ValueError("Input image must be a valid numpy array")
-    c = 255.0 / np.log(256.0)
-    lut = np.array([c * np.log1p(i) for i in range(256)])
-    lut = np.clip(lut, 0, 255).astype(np.uint8)
-    return cv2.LUT(image, lut)
+    return cv2.LUT(image, _LOG_LUT)
 
 # %% [HÀM BIẾN ĐỔI GAMMA]
 def apply_gamma_transform(image, gamma):
@@ -28,9 +38,7 @@ def apply_gamma_transform(image, gamma):
         raise ValueError("Input image must be a valid numpy array")
     if gamma <= 0:
         raise ValueError(f"Gamma must be positive, got {gamma}")
-    lut = np.array([255.0 * ((i / 255.0) ** gamma) for i in range(256)])
-    lut = np.clip(lut, 0, 255).astype(np.uint8)
-    return cv2.LUT(image, lut)
+    return cv2.LUT(image, _gamma_lut(float(gamma)))
 
 # %% [HÀM CẮT MẶT PHẲNG BIT]
 def apply_bit_plane_slicing(image, bit):
@@ -108,3 +116,49 @@ def process_video_generator(video_path, filter_name, **kwargs):
                 yield frame
     finally:
         cap.release()
+
+
+if __name__ == "__main__":
+    import matplotlib.pyplot as plt
+
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    dataset_path = os.path.join(current_dir, "dataset", "z8059496394582_d29a8d50b68f0dca7d51e2edef948211.jpg")
+    img_test = cv2.imread(dataset_path)
+
+    if img_test is None:
+        raise FileNotFoundError(f"Khong tim thay anh test tai {dataset_path}")
+
+    img_rgb = cv2.cvtColor(img_test, cv2.COLOR_BGR2RGB)
+    print("Da nap anh test thanh cong, san sang kiem thu tung ham!")
+
+    test_images = [
+        ("Dao anh (Negative)", apply_negative(img_test)),
+        ("Bien doi Logarit", apply_log_transform(img_test)),
+        ("Bien doi Gamma 0.5", apply_gamma_transform(img_test, gamma=0.5)),
+        ("Bit-Plane Slicing (Bit 7)", apply_bit_plane_slicing(img_test, bit=7)),
+    ]
+    for title, result in test_images:
+        plt.figure(figsize=(8, 4))
+        plt.subplot(1, 2, 1)
+        plt.title("Anh goc")
+        plt.imshow(img_rgb)
+        plt.axis("off")
+        plt.subplot(1, 2, 2)
+        plt.title(title)
+        plt.imshow(cv2.cvtColor(result, cv2.COLOR_BGR2RGB))
+        plt.axis("off")
+        plt.show()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
