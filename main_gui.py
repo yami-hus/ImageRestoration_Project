@@ -31,7 +31,6 @@ class ImageProcessingApp(ctk.CTk):
         self.batch_header_frame = None 
         self.grid_container = None     
         self.current_video_path = None
-        self.clean_dir_t2 = None  
         
         # Biến Tab 3
         self.clean_image = None
@@ -243,10 +242,6 @@ class ImageProcessingApp(ctk.CTk):
         self.btn_save_batch = ctk.CTkButton(self.bottom_action_frame, text="Lưu Ảnh/Video", width=220, height=45, corner_radius=8, font=("Arial", 14, "bold"), 
                       command=self.run_save_batch, fg_color="#2B5B84", hover_color="#1E4363")
         self.btn_save_batch.pack_forget()
-
-        self.btn_eval_batch = ctk.CTkButton(self.bottom_action_frame, text="Lưu File Đánh Giá PSNR/SSIM", width=220, height=45, corner_radius=8, font=("Arial", 14, "bold"), 
-                      command=self.run_evaluate_batch, fg_color="#4CAF50", hover_color="#388E3C")
-        self.btn_eval_batch.pack_forget()
         
         self.batch_preview_frame = ctk.CTkFrame(main_t2, corner_radius=10, fg_color="#1E1E1E", border_width=1, border_color="#3A3A3A")
         self.batch_preview_frame.pack(side="top", expand=True, fill="both", padx=30, pady=(10, 20))
@@ -341,8 +336,7 @@ class ImageProcessingApp(ctk.CTk):
         self.current_video_path = None
         
         self.btn_save_batch.configure(text="Lưu Ảnh Xử Lý")
-        self.btn_save_batch.pack(side="left", padx=(100, 20), expand=True)
-        self.btn_eval_batch.pack(side="right", padx=(20, 100), expand=True)
+        self.btn_save_batch.pack(anchor="center", pady=(0, 0))
         
         if getattr(self, 'grid_container', None):
             self.grid_container.destroy()
@@ -444,55 +438,6 @@ class ImageProcessingApp(ctk.CTk):
                 
             messagebox.showinfo("Hoàn Tất", f"Đã lưu thành công {count} ảnh!")
 
-    def run_evaluate_batch(self):
-        if not self.batch_filepaths:
-            messagebox.showwarning("Cảnh báo", "Tính năng này chỉ dành cho Batch Ảnh!")
-            return
-
-        clean_dir = filedialog.askdirectory(title="Chọn thư mục chứa Ảnh Chuẩn")
-        if not clean_dir: return
-
-        csv_path = filedialog.asksaveasfilename(title="Chọn nơi lưu file đánh giá", defaultextension=".csv", filetypes=[("CSV file", "*.csv")])
-        if not csv_path: return
-
-        f_type = self.filter_var_t2.get()
-        g_val = self.gamma_slider_t2.get()
-        b_val = int(self.bit_slider_t2.get())
-
-        self.btn_eval_batch.configure(state="disabled", text="Đang Chấm Điểm...")
-
-        def eval_task():
-            report_lines = ["Filename,PSNR,SSIM"]
-            count = 0
-            
-            for path in self.batch_filepaths:
-                filename = os.path.basename(path)
-                clean_path = os.path.join(clean_dir, filename)
-                
-                if os.path.exists(clean_path):
-                    img = cv2.imread(path)
-                    if img is None: continue
-                    p_img = self.apply_filter_to_img(img, f_type, g_val, b_val)
-                    
-                    clean_img = cv2.imread(clean_path)
-                    h, w = p_img.shape[:2]
-                    clean_img = cv2.resize(clean_img, (w, h))
-                    
-                    psnr_val = metrics.calc_psnr(clean_img, p_img)
-                    ssim_val = metrics.calc_ssim(clean_img, p_img)
-                    report_lines.append(f"{filename},{psnr_val:.2f},{ssim_val:.4f}")
-                    count += 1
-                else:
-                    report_lines.append(f"{filename},Không tìm thấy file Clean tương ứng,")
-
-            with open(csv_path, "w", encoding="utf-8-sig") as f:
-                f.write("\n".join(report_lines))
-                
-            self.after(0, lambda: messagebox.showinfo("Hoàn Tất", f"Đã đánh giá thành công {count} ảnh.\nBảng điểm được lưu tại:\n{csv_path}"))
-            self.after(0, lambda: self.btn_eval_batch.configure(state="normal", text="📊 Đánh Giá PSNR/SSIM"))
-
-        threading.Thread(target=eval_task, daemon=True).start()
-
     def play_video(self):
         if self.video_playing:
             self.video_playing = False
@@ -505,7 +450,6 @@ class ImageProcessingApp(ctk.CTk):
         self.batch_filepaths = []
         self.current_video_path = filepath
         
-        self.btn_eval_batch.pack_forget()
         self.btn_save_batch.configure(text="Lưu Video Xử Lý")
         self.btn_save_batch.pack(anchor="center", pady=(0,0))
         
@@ -618,7 +562,7 @@ class ImageProcessingApp(ctk.CTk):
         filepath = filedialog.askopenfilename(filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp")])
         if filepath:
             self.clean_image = cv2.imread(filepath)
-            self.btn_load_damaged.configure(state="normal") # Mở khóa nút Tải Ảnh Hỏng
+            self.btn_load_damaged.configure(state="normal") 
             
             if self.damaged_image is not None:
                 h, w = self.clean_image.shape[:2]
