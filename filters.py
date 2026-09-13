@@ -118,6 +118,43 @@ def process_video_generator(video_path, filter_name, **kwargs):
         cap.release()
 
 
+def save_processed_video(input_video_path, output_video_path, filter_name, **kwargs):
+    """Xử lý video và lưu kết quả ra file video mới."""
+    if not input_video_path or not isinstance(input_video_path, str):
+        raise ValueError("Đường dẫn video đầu vào không hợp lệ")
+    if not output_video_path or not isinstance(output_video_path, str):
+        raise ValueError("Đường dẫn video đầu ra không hợp lệ")
+
+    os.makedirs(os.path.dirname(output_video_path) or ".", exist_ok=True)
+
+    cap = cv2.VideoCapture(input_video_path)
+    if not cap.isOpened():
+        raise ValueError(f"Không thể mở video: {input_video_path}")
+
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if fps <= 0:
+        fps = 25.0
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    if width <= 0 or height <= 0:
+        raise ValueError(f"Kích thước video không hợp lệ: {input_video_path}")
+
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    writer = cv2.VideoWriter(output_video_path, fourcc, fps, (width, height))
+    if not writer.isOpened():
+        cap.release()
+        raise ValueError(f"Không thể tạo video đầu ra: {output_video_path}")
+
+    try:
+        for processed_frame in process_video_generator(input_video_path, filter_name, **kwargs):
+            writer.write(processed_frame)
+        return output_video_path
+    finally:
+        writer.release()
+        cap.release()
+
+
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
 
