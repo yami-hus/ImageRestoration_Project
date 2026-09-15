@@ -1,671 +1,736 @@
-import customtkinter as ctk
-from tkinter import filedialog, messagebox
-import cv2
-from PIL import Image
+import sys
 import os
 import threading
+
+import cv2
+
+from PySide6.QtCore import Qt, QObject, Signal, QTimer
+from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QTabWidget, QPushButton, QLabel, QComboBox, QSlider, QScrollArea,
+    QFileDialog, QMessageBox, QFrame, QStackedWidget,
+)
 
 import filters
 import metrics
 
-ctk.set_appearance_mode("dark")
-ctk.set_default_color_theme("dark-blue")
 
-class ImageProcessingApp(ctk.CTk):
+def cv2_to_qpixmap(img):
+    if img is None:
+        return QPixmap()
+    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    h, w, ch = rgb.shape
+    qimg = QImage(rgb.data, w, h, rgb.strides[0], QImage.Format_RGB888)
+    return QPixmap.fromImage(qimg.copy())
+
+
+class ImageLabel(QLabel):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._pixmap = QPixmap()
+        self.setAlignment(Qt.AlignCenter)
+        self.setMinimumSize(100, 100)
+        self.setObjectName("imgLabel")
+        self.setText("Chưa có ảnh")
+        self.setStyleSheet(
+            "QLabel#imgLabel { background-color: #0F172A; border: 1px solid #2D3A4F;"
+            " border-radius: 8px; color: #475569; }"
+        )
+
+    def set_cv_image(self, img):
+        self._pixmap = cv2_to_qpixmap(img)
+        self._update_pixmap()
+
+    def _update_pixmap(self):
+        if not self._pixmap.isNull():
+            self.setPixmap(self._pixmap.scaled(
+                self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        else:
+            self.setText("Chưa có ảnh")
+            self.setPixmap(QPixmap())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_pixmap()
+
+
+class ThreadDone(QObject):
+    finished = Signal(str, object)
+
+
+class ImageApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.title("Ứng Dụng Khôi Phục Ảnh Cũ")
-        self.geometry("1350x850")
-        self.minsize(1100, 750)
+        self.setWindowTitle("Ứng Dụng Khôi Phục Ảnh Cũ - Nhóm IP")
+        self.resize(1350, 850)
 
-        # Biến Tab 1
-        self.original_image = None
-        self.processed_image = None
-        self.clean_image_t1 = None  
-        self.process_job = None  
-        
-        # Biến Tab 2
-        self.video_playing = False
-        self.batch_preview_job = None
-        self.preview_thread_id = 0  
-        self.batch_header_frame = None 
-        self.grid_container = None     
-        self.current_video_path = None
-        
-        # Biến Tab 3
-        self.clean_image = None
-        self.damaged_image = None
-        self.tab3_gamma_job = None
-        self.tab3_bit_job = None
+        self._apply_theme()
 
-        self.tabview = ctk.CTkTabview(self, corner_radius=10)
-        self.tabview.pack(padx=20, pady=10, expand=True, fill="both")
-        
-        self.tab_single = self.tabview.add("PSNR & SSIM (Đơn Ảnh)")
-        self.tab_batch = self.tabview.add("Batch Processing & Video")
-        self.tab_compare = self.tabview.add("So sánh phương pháp")
+        self.t1_orig_cv = None
+        self.t1_clean_cv = None
+        self.t1_proc_cv = None
 
-        self.setup_single_tab()
-        self.setup_batch_tab()
-        self.setup_compare_tab()
+        self.t2_paths = []
+        self.t2_video_path = None
+        self.t2_vid_cap = None
+        self.t2_vid_timer = QTimer(self)
+        self.t2_vid_timer.timeout.connect(self._t2_video_step)
 
-    # ==========================================
-    # TAB 1: PSNR & SSIM (XỬ LÝ ĐƠN ẢNH)
-    # ==========================================
-    def setup_single_tab(self):
-        sidebar_frame = ctk.CTkFrame(self.tab_single, width=280, corner_radius=12)
-        sidebar_frame.pack(side="left", fill="y", padx=10, pady=10)
+        self.t3_clean_cv = None
+        self.t3_dam_cv = None
 
-        btn_frame = ctk.CTkFrame(sidebar_frame, fg_color="transparent")
-        btn_frame.pack(pady=20, padx=20, fill="x")
-        
-        ctk.CTkButton(btn_frame, text="Nạp Ảnh Cần Xử Lý", height=40, corner_radius=8, font=("Arial", 13, "bold"),
-                      command=self.load_single_image).pack(pady=(0, 10), fill="x")
-                      
-        ctk.CTkButton(btn_frame, text="Nạp Ảnh Chuẩn", height=40, corner_radius=8, font=("Arial", 13, "bold"),
-                      fg_color="#4CAF50", hover_color="#388E3C",
-                      command=self.load_clean_t1).pack(pady=(0, 10), fill="x")
-        
-        ctk.CTkButton(btn_frame, text="Lưu Kết Quả", height=40, corner_radius=8, font=("Arial", 13, "bold"),
-                      fg_color="#2B5B84", hover_color="#1E4363",
-                      command=self.save_single_image).pack(fill="x")
+        self._build_ui()
 
-        ctk.CTkLabel(sidebar_frame, text="Thay đổi tham số bộ lọc", text_color="gray", font=("Arial", 12, "bold")).pack(pady=(15, 0))
-        self.filter_var = ctk.StringVar(value="negative")
-        filters_list = ["negative", "log", "gamma", "bitplane"]
-        ctk.CTkOptionMenu(sidebar_frame, variable=self.filter_var, values=filters_list, 
-                          height=35, command=self.on_filter_select_t1).pack(pady=(5, 20), padx=20, fill="x")
+    def _apply_theme(self):
+        self.setStyleSheet("""
+            QMainWindow, QWidget { background-color: #0B0F19; color: #E2E8F0;
+                font-family: 'Segoe UI'; font-size: 13px; }
+            QFrame#card { background-color: #1E293B; border: 1px solid #2D3A4F;
+                border-radius: 12px; }
+            QFrame#imgFrame { background-color: #1E293B; border: 1px solid #2D3A4F;
+                border-radius: 12px; }
+            QLabel { background: transparent; }
+            QLabel#title { color: #94A3B8; font-weight: bold; font-size: 14px; }
+            QLabel#metric { color: #38BDF8; font-weight: bold; font-size: 15px; }
+            QLabel#boxTitle { color: #94A3B8; font-weight: bold; font-size: 13px; }
+            QComboBox { background-color: #0F172A; border: 1px solid #38BDF8;
+                border-radius: 6px; padding: 6px 10px; }
+            QComboBox QAbstractItemView { background-color: #0F172A; color: #E2E8F0;
+                selection-background-color: #1E3A8A; }
+            QSlider::groove:horizontal { height: 6px; background: #334155;
+                border-radius: 3px; }
+            QSlider::handle:horizontal { width: 16px; background: #38BDF8;
+                margin: -5px 0; border-radius: 8px; }
+            QScrollArea { border: none; background: transparent; }
+            QScrollBar:vertical { background: #0F172A; width: 10px;
+                border-radius: 5px; }
+            QScrollBar::handle:vertical { background: #475569; border-radius: 5px;
+                min-height: 30px; }
+            QScrollBar::add-line, QScrollBar::sub-line { height: 0; }
+            QTabWidget::pane { border: 1px solid #2D3A4F; border-radius: 12px;
+                background: #0B0F19; }
+            QTabBar::tab { background: #1E293B; color: #94A3B8;
+                padding: 10px 18px; border-top-left-radius: 8px;
+                border-top-right-radius: 8px; margin-right: 4px; font-weight: bold; }
+            QTabBar::tab:selected { background: #2563EB; color: white; }
+        """)
 
-        self.t1_slider_frame = ctk.CTkFrame(sidebar_frame, fg_color="transparent")
-        self.t1_slider_frame.pack(fill="x", padx=20)
-        
-        self.lbl_gamma_val = ctk.CTkLabel(self.t1_slider_frame, text="Chỉnh Gamma: 1.00", font=("Arial", 13, "bold"), text_color="#5CE1E6")
-        self.gamma_slider = ctk.CTkSlider(self.t1_slider_frame, from_=0.1, to=5.0, command=self.on_slider_change_t1)
-        self.gamma_slider.set(1.0)
-        self.lbl_bit_val = ctk.CTkLabel(self.t1_slider_frame, text="Chỉnh Bit (0-7): 7", font=("Arial", 13, "bold"), text_color="#5CE1E6")
-        self.bit_slider = ctk.CTkSlider(self.t1_slider_frame, from_=0, to=7, number_of_steps=7, command=self.on_slider_change_t1)
-        self.bit_slider.set(7)
+    def make_button(self, text, color1="#00c6ff", color2="#0072ff"):
+        btn = QPushButton(text)
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setMinimumHeight(42)
+        btn.setStyleSheet(
+            f"QPushButton {{ background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            f"stop:0 {color1}, stop:1 {color2}); color: white; font-weight: bold;"
+            f" border: none; border-radius: 8px; padding: 8px 14px; }}"
+            f"QPushButton:hover {{ background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            f"stop:0 {color1}, stop:1 {color1}); }}"
+        )
+        return btn
 
-        self.metrics_box = ctk.CTkFrame(sidebar_frame, corner_radius=10, fg_color="#2A2D30", border_width=1, border_color="#3D3D3D")
-        
-        ctk.CTkLabel(self.metrics_box, text="Đánh Giá Kết Quả", text_color="gray", font=("Arial", 13, "bold")).pack(pady=(10, 5))
-        self.lbl_psnr = ctk.CTkLabel(self.metrics_box, text="PSNR: --", font=("Arial", 16, "bold"), text_color="#5CE1E6")
-        self.lbl_psnr.pack(pady=2)
-        self.lbl_ssim = ctk.CTkLabel(self.metrics_box, text="SSIM: --", font=("Arial", 16, "bold"), text_color="#5CE1E6")
-        self.lbl_ssim.pack(pady=(2, 15))
+    def make_card(self, title=None):
+        frame = QFrame()
+        frame.setObjectName("card")
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+        if title:
+            layout.addWidget(self._title_label(title))
+        return frame, layout
 
-        display_frame = ctk.CTkFrame(self.tab_single, fg_color="transparent")
-        display_frame.pack(side="right", expand=True, fill="both", padx=10, pady=10)
-        display_frame.columnconfigure(0, weight=1)
-        display_frame.columnconfigure(1, weight=1)
-        display_frame.rowconfigure(1, weight=1)
+    def _title_label(self, text):
+        lbl = QLabel(text)
+        lbl.setObjectName("title")
+        return lbl
 
-        ctk.CTkLabel(display_frame, text="Ảnh Trước (Hỏng)", font=("Arial", 16, "bold")).grid(row=0, column=0, pady=(0, 10))
-        ctk.CTkLabel(display_frame, text="Ảnh Sau (Đã xử lý)", font=("Arial", 16, "bold")).grid(row=0, column=1, pady=(0, 10))
+    def _metric_label(self):
+        lbl = QLabel("PSNR: -- | SSIM: --")
+        lbl.setObjectName("metric")
+        return lbl
 
-        frame_orig = ctk.CTkFrame(display_frame, corner_radius=8, fg_color="#1E1E1E", border_width=1, border_color="#3A3A3A")
-        frame_orig.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
-        self.lbl_orig_img = ctk.CTkLabel(frame_orig, text="Chưa tải ảnh", text_color="gray")
-        self.lbl_orig_img.pack(expand=True)
+    def make_box(self, title):
+        frame = QFrame()
+        frame.setObjectName("imgFrame")
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+        header = QLabel(title)
+        header.setObjectName("boxTitle")
+        img = ImageLabel()
+        layout.addWidget(header)
+        layout.addWidget(img, 1)
+        return frame, layout, img
 
-        frame_proc = ctk.CTkFrame(display_frame, corner_radius=8, fg_color="#1E1E1E", border_width=1, border_color="#3A3A3A")
-        frame_proc.grid(row=1, column=1, sticky="nsew", padx=10, pady=10)
-        self.lbl_proc_img = ctk.CTkLabel(frame_proc, text="Chưa tải ảnh", text_color="gray")
-        self.lbl_proc_img.pack(expand=True)
-        
-        self.update_slider_visibility_t1()
+    def _make_slider_row(self, name, lo, hi, val, on_change, fmt, integer=False):
+        container = QWidget()
+        row = QHBoxLayout(container)
+        row.setContentsMargins(0, 0, 0, 0)
+        lbl = QLabel("")
+        lbl.setObjectName("metric")
+        row.addWidget(lbl)
 
-    def update_slider_visibility_t1(self):
-        f = self.filter_var.get()
-        self.lbl_gamma_val.pack_forget()
-        self.gamma_slider.pack_forget()
-        self.lbl_bit_val.pack_forget()
-        self.bit_slider.pack_forget()
-        self.metrics_box.pack_forget() 
+        slider = QSlider(Qt.Horizontal)
+        slider.setMinimum(int(lo * 100))
+        slider.setMaximum(int(hi * 100))
+        slider.setValue(int(val * 100))
+        slider.setToolTip(name)
 
-        if f == "gamma":
-            self.lbl_gamma_val.pack(pady=(0, 5), fill="x")
-            self.gamma_slider.pack(pady=(0, 15), fill="x")
-            self.metrics_box.pack(pady=20, padx=20, fill="x")
-        elif f == "bitplane":
-            self.lbl_bit_val.pack(pady=(0, 5), fill="x")
-            self.bit_slider.pack(pady=(0, 15), fill="x")
-            self.metrics_box.pack(pady=20, padx=20, fill="x")
-
-    def load_single_image(self):
-        filepath = filedialog.askopenfilename(title="Chọn ảnh hỏng cần xử lý", filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp")])
-        if filepath:
-            self.original_image = cv2.imread(filepath)
-            self.display_cv_image(self.original_image, self.lbl_orig_img)
-            self.apply_single_filter()
-            
-    def load_clean_t1(self):
-        filepath = filedialog.askopenfilename(title="Chọn ảnh chuẩn để so sánh chấm điểm", filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp")])
-        if filepath:
-            self.clean_image_t1 = cv2.imread(filepath)
-            messagebox.showinfo("Thành công", "Đã nạp ảnh Clean tham chiếu. PSNR và SSIM sẽ được tính toán!")
-            self.apply_single_filter()
-
-    def save_single_image(self):
-        if self.processed_image is not None:
-            filepath = filedialog.asksaveasfilename(
-                defaultextension=".png",
-                filetypes=[("PNG file", "*.png"), ("JPEG file", "*.jpg"), ("All files", "*.*")]
-            )
-            if filepath:
-                cv2.imwrite(filepath, self.processed_image)
-                messagebox.showinfo("Thành công", "Đã lưu kết quả ảnh!")
-
-    def on_filter_select_t1(self, value):
-        self.update_slider_visibility_t1()
-        self.apply_single_filter()
-
-    def on_slider_change_t1(self, value=None):
-        self.lbl_gamma_val.configure(text=f"Chỉnh Gamma: {self.gamma_slider.get():.2f}")
-        self.lbl_bit_val.configure(text=f"Chỉnh Bit (0-7): {int(self.bit_slider.get())}")
-        if self.process_job: self.after_cancel(self.process_job)
-        self.process_job = self.after(150, self.apply_single_filter)
-
-    def apply_single_filter(self):
-        if self.original_image is None: return
-        f_type = self.filter_var.get()
-        try:
-            if f_type == "negative":
-                self.processed_image = filters.apply_negative(self.original_image)
-            elif f_type == "log":
-                self.processed_image = filters.apply_log_transform(self.original_image)
-            elif f_type == "gamma":
-                self.processed_image = filters.apply_gamma_transform(self.original_image, gamma=self.gamma_slider.get())
-            elif f_type == "bitplane":
-                self.processed_image = filters.apply_bit_plane_slicing(self.original_image, bit=int(self.bit_slider.get()))
-
-            self.display_cv_image(self.processed_image, self.lbl_proc_img)
-            
-            if self.clean_image_t1 is not None and self.processed_image is not None and f_type in ["gamma", "bitplane"]:
-                h, w = self.processed_image.shape[:2]
-                clean_resized = cv2.resize(self.clean_image_t1, (w, h))
-                psnr = metrics.calc_psnr(clean_resized, self.processed_image)
-                ssim = metrics.calc_ssim(clean_resized, self.processed_image)
-                self.lbl_psnr.configure(text=f"PSNR: {psnr:.2f}")
-                self.lbl_ssim.configure(text=f"SSIM: {ssim:.4f}")
+        def update_label(*_):
+            v = slider.value() / 100.0
+            if integer:
+                lbl.setText(fmt.format(int(v)))
             else:
-                self.lbl_psnr.configure(text="PSNR: Chờ ảnh Clean")
-                self.lbl_ssim.configure(text="SSIM: Chờ ảnh Clean")
+                lbl.setText(fmt.format(v))
 
-        except Exception as e:
-            print(f"Lỗi: {e}")
+        update_label()
+        slider.valueChanged.connect(update_label)
+        slider.valueChanged.connect(on_change)
+        row.addWidget(slider, 1)
+        return container, lbl, slider
 
-    # ==========================================
-    # TAB 2: BATCH PROCESSING & VIDEO
-    # ==========================================
-    def setup_batch_tab(self):
-        sidebar_t2 = ctk.CTkFrame(self.tab_batch, width=280, corner_radius=12)
-        sidebar_t2.pack(side="left", fill="y", padx=10, pady=10)
-        
-        ctk.CTkLabel(sidebar_t2, text="CÀI ĐẶT BỘ LỌC", font=("Arial", 14, "bold")).pack(pady=20)
-        
-        self.filter_var_t2 = ctk.StringVar(value="negative")
-        filters_list = ["negative", "log", "gamma", "bitplane"]
-        ctk.CTkOptionMenu(sidebar_t2, variable=self.filter_var_t2, values=filters_list, 
-                          height=35, command=self.on_filter_select_t2).pack(pady=10, padx=20, fill="x")
+    def _build_ui(self):
+        tabs = QTabWidget()
+        tabs.addTab(self._build_tab1(), "1. PSNR & SSIM (Đơn Ảnh)")
+        tabs.addTab(self._build_tab2(), "2. Batch Processing & Video")
+        tabs.addTab(self._build_tab3(), "3. So sánh phương pháp")
+        self.setCentralWidget(tabs)
 
-        self.t2_slider_frame = ctk.CTkFrame(sidebar_t2, fg_color="transparent")
-        self.t2_slider_frame.pack(fill="x", padx=20)
-        
-        self.gamma_slider_t2 = ctk.CTkSlider(self.t2_slider_frame, from_=0.1, to=5.0, command=self.on_slider_change_t2)
-        self.gamma_slider_t2.set(1.0)
-        self.lbl_gamma_val_t2 = ctk.CTkLabel(self.t2_slider_frame, text="Chỉnh Gamma: 1.00", font=("Arial", 13, "bold"), text_color="#5CE1E6")
-        
-        self.bit_slider_t2 = ctk.CTkSlider(self.t2_slider_frame, from_=0, to=7, number_of_steps=7, command=self.on_slider_change_t2)
-        self.bit_slider_t2.set(7)
-        self.lbl_bit_val_t2 = ctk.CTkLabel(self.t2_slider_frame, text="Chỉnh Bit (0-7): 7", font=("Arial", 13, "bold"), text_color="#5CE1E6")
+    # ---------- TAB 1 ----------
+    def _build_tab1(self):
+        root = QWidget()
+        layout = QHBoxLayout(root)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(16)
 
-        self.update_slider_visibility_t2()
+        ctrl_frame, ctrl_lay = self.make_card("THÔNG SỐ BỘ LỌC")
 
-        main_t2 = ctk.CTkFrame(self.tab_batch, fg_color="transparent")
-        main_t2.pack(side="right", expand=True, fill="both")
-        
-        btn_frame = ctk.CTkFrame(main_t2, fg_color="transparent")
-        btn_frame.pack(side="top", pady=(20, 10))
-        
-        ctk.CTkButton(btn_frame, text="Nạp Batch Ảnh", width=160, height=45, corner_radius=8, font=("Arial", 14, "bold"), 
-                      command=self.select_batch_images).pack(side="left", padx=10)
+        btn_open_orig = self.make_button("Nạp Ảnh Cần Xử Lý", "#00c6ff", "#0072ff")
+        btn_open_orig.clicked.connect(self._t1_open_orig)
+        ctrl_lay.addWidget(btn_open_orig)
 
-        self.btn_video = ctk.CTkButton(btn_frame, text="Nạp Video", width=160, height=45, corner_radius=8, font=("Arial", 14, "bold"), 
-                      command=self.play_video)
-        self.btn_video.pack(side="left", padx=10)
-        
-        self.bottom_action_frame = ctk.CTkFrame(main_t2, fg_color="transparent", height=45)
-        self.bottom_action_frame.pack(side="bottom", fill="x", pady=(0, 20))
-        self.bottom_action_frame.pack_propagate(False)
-        
-        self.btn_save_batch = ctk.CTkButton(self.bottom_action_frame, text="Lưu Ảnh/Video", width=220, height=45, corner_radius=8, font=("Arial", 14, "bold"), 
-                      command=self.run_save_batch, fg_color="#2B5B84", hover_color="#1E4363")
-        self.btn_save_batch.pack_forget()
-        
-        self.batch_preview_frame = ctk.CTkFrame(main_t2, corner_radius=10, fg_color="#1E1E1E", border_width=1, border_color="#3A3A3A")
-        self.batch_preview_frame.pack(side="top", expand=True, fill="both", padx=30, pady=(10, 20))
-        self.batch_preview_frame.pack_propagate(False)
+        btn_open_clean = self.make_button("Nạp Ảnh Chuẩn (Clean)", "#10B981", "#059669")
+        btn_open_clean.clicked.connect(self._t1_open_clean)
+        ctrl_lay.addWidget(btn_open_clean)
 
-        self.lbl_batch_status = ctk.CTkLabel(self.batch_preview_frame, text="Chưa nạp dữ liệu.", text_color="gray", font=("Arial", 16))
-        self.lbl_batch_status.place(relx=0.5, rely=0.5, anchor="center")
+        btn_save = self.make_button("Lưu Kết Quả", "#F59E0B", "#D97706")
+        btn_save.clicked.connect(self._t1_save)
+        ctrl_lay.addWidget(btn_save)
 
-        self.batch_filepaths = []
-        self.batch_image_widgets = []
+        ctrl_lay.addSpacing(10)
+        ctrl_lay.addWidget(self._title_label("Thay đổi tham số bộ lọc"))
 
-    def on_filter_select_t2(self, value=None):
-        self.update_slider_visibility_t2()
-        self.schedule_batch_preview()
+        self.t1_filter_cb = QComboBox()
+        self.t1_filter_cb.addItem("Negative (Đảo ảnh)", "negative")
+        self.t1_filter_cb.addItem("Log Transform", "log")
+        self.t1_filter_cb.addItem("Gamma Transform", "gamma")
+        self.t1_filter_cb.addItem("Bitplane Slicing", "bitplane")
+        self.t1_filter_cb.currentIndexChanged.connect(self._t1_filter_changed)
+        ctrl_lay.addWidget(self.t1_filter_cb)
 
-    def on_slider_change_t2(self, value=None):
-        self.lbl_gamma_val_t2.configure(text=f"Chỉnh Gamma: {self.gamma_slider_t2.get():.2f}")
-        self.lbl_bit_val_t2.configure(text=f"Chỉnh Bit (0-7): {int(self.bit_slider_t2.get())}")
-        self.schedule_batch_preview()
+        self.t1_gamma_row, self.t1_gamma_lbl, self.t1_gamma_slider = self._make_slider_row(
+            "Gamma", 0.1, 5.0, 1.0, self._t1_apply, "Gamma: {:.2f}")
+        ctrl_lay.addWidget(self.t1_gamma_row)
+        self.t1_gamma_row.setVisible(False)
 
-    def update_slider_visibility_t2(self, value=None):
-        f = self.filter_var_t2.get()
-        self.lbl_gamma_val_t2.pack_forget()
-        self.gamma_slider_t2.pack_forget()
-        self.lbl_bit_val_t2.pack_forget()
-        self.bit_slider_t2.pack_forget()
+        self.t1_bit_row, self.t1_bit_lbl, self.t1_bit_slider = self._make_slider_row(
+            "Bit", 0, 7, 7, self._t1_apply, "Bit: {}", integer=True)
+        ctrl_lay.addWidget(self.t1_bit_row)
+        self.t1_bit_row.setVisible(False)
 
-        if f == "gamma":
-            self.lbl_gamma_val_t2.pack(pady=(5, 0))
-            self.gamma_slider_t2.pack(pady=(0, 10), fill="x")
-        elif f == "bitplane":
-            self.lbl_bit_val_t2.pack(pady=(5, 0))
-            self.bit_slider_t2.pack(pady=(0, 10), fill="x")
+        metric_frame = QFrame()
+        metric_frame.setObjectName("card")
+        mlay = QVBoxLayout(metric_frame)
+        mlay.setContentsMargins(14, 14, 14, 14)
+        mlay.addWidget(self._title_label("Đánh Giá Kết Quả"))
+        self.t1_psnr_lbl = QLabel("PSNR: --")
+        self.t1_psnr_lbl.setObjectName("metric")
+        self.t1_ssim_lbl = QLabel("SSIM: --")
+        self.t1_ssim_lbl.setObjectName("metric")
+        mlay.addWidget(self.t1_psnr_lbl)
+        mlay.addWidget(self.t1_ssim_lbl)
 
-    def schedule_batch_preview(self):
-        if self.batch_preview_job:
-            self.after_cancel(self.batch_preview_job)
-        if self.video_playing: return
-        self.batch_preview_job = self.after(150, self.update_batch_preview)
+        ctrl_lay.addStretch(1)
 
-    def apply_filter_to_img(self, img, f_type, g_val, b_val):
-        try:
-            if f_type == "negative": return filters.apply_negative(img)
-            elif f_type == "log": return filters.apply_log_transform(img)
-            elif f_type == "gamma": return filters.apply_gamma_transform(img, gamma=g_val)
-            elif f_type == "bitplane": return filters.apply_bit_plane_slicing(img, bit=b_val)
-        except Exception:
-            pass
-        return img
+        orig_frame = QFrame()
+        orig_frame.setObjectName("imgFrame")
+        olay = QVBoxLayout(orig_frame)
+        olay.setContentsMargins(10, 10, 10, 10)
+        olay.addWidget(self._title_label("Ảnh Trước (Hỏng)"))
+        self.t1_img_orig = ImageLabel()
+        olay.addWidget(self.t1_img_orig, 1)
 
-    def update_batch_preview(self):
-        if not hasattr(self, 'batch_filepaths') or not self.batch_filepaths or self.video_playing: 
+        proc_frame = QFrame()
+        proc_frame.setObjectName("imgFrame")
+        play = QVBoxLayout(proc_frame)
+        play.setContentsMargins(10, 10, 10, 10)
+        play.addWidget(self._title_label("Ảnh Sau (Đã xử lý)"))
+        self.t1_img_proc = ImageLabel()
+        play.addWidget(self.t1_img_proc, 1)
+
+        imgs_row = QHBoxLayout()
+        imgs_row.setSpacing(16)
+        imgs_row.addWidget(orig_frame, 1)
+        imgs_row.addWidget(proc_frame, 1)
+
+        ctrl_panel = QWidget()
+        ctrl_panel.setFixedWidth(320)
+        cl = QVBoxLayout(ctrl_panel)
+        cl.setContentsMargins(0, 0, 0, 0)
+        cl.addWidget(ctrl_frame)
+        cl.addWidget(metric_frame)
+
+        layout.addWidget(ctrl_panel)
+        imgs_widget = QWidget()
+        iw_lay = QVBoxLayout(imgs_widget)
+        iw_lay.setContentsMargins(0, 0, 0, 0)
+        iw_lay.addLayout(imgs_row)
+        layout.addWidget(imgs_widget, 1)
+
+        return root
+
+    # ---------- TAB 2 ----------
+    def _build_tab2(self):
+        root = QWidget()
+        layout = QVBoxLayout(root)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        btns = QHBoxLayout()
+        btn_batch = self.make_button("Nạp Batch Ảnh", "#00c6ff", "#0072ff")
+        btn_batch.clicked.connect(self._t2_open_batch)
+        btn_video = self.make_button("Nạp Video", "#8B5CF6", "#6D28D9")
+        btn_video.clicked.connect(self._t2_open_video)
+        btn_save = self.make_button("Lưu Ảnh/Video", "#F59E0B", "#D97706")
+        btn_save.clicked.connect(self._t2_save)
+        btns.addWidget(btn_batch)
+        btns.addWidget(btn_video)
+        btns.addWidget(btn_save)
+        btns.addStretch(1)
+        layout.addLayout(btns)
+
+        filt_row = QHBoxLayout()
+        filt_row.addWidget(self._title_label("Bộ lọc:"))
+        self.t2_filter_cb = QComboBox()
+        for text, key in [("Negative (Đảo ảnh)", "negative"), ("Log Transform", "log"),
+                          ("Gamma Transform", "gamma"), ("Bitplane Slicing", "bitplane")]:
+            self.t2_filter_cb.addItem(text, key)
+        self.t2_filter_cb.currentIndexChanged.connect(self._t2_filter_changed)
+        filt_row.addWidget(self.t2_filter_cb)
+
+        self.t2_gamma_row, self.t2_gamma_lbl, self.t2_gamma_slider = self._make_slider_row(
+            "Gamma", 0.1, 5.0, 1.0, self._t2_apply_preview, "Gamma: {:.2f}")
+        filt_row.addWidget(self.t2_gamma_row)
+        self.t2_gamma_row.setVisible(False)
+
+        self.t2_bit_row, self.t2_bit_lbl, self.t2_bit_slider = self._make_slider_row(
+            "Bit", 0, 7, 7, self._t2_apply_preview, "Bit: {}", integer=True)
+        filt_row.addWidget(self.t2_bit_row)
+        self.t2_bit_row.setVisible(False)
+
+        filt_row.addStretch(1)
+        layout.addLayout(filt_row)
+
+        self.t2_stack = QStackedWidget()
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        self.t2_grid_container = QWidget()
+        self.t2_grid_lay = QVBoxLayout(self.t2_grid_container)
+        self.t2_grid_lay.setContentsMargins(4, 4, 4, 4)
+        self.t2_grid_lay.setSpacing(12)
+        self.t2_grid_lay.addStretch(1)
+        scroll.setWidget(self.t2_grid_container)
+
+        self.t2_vid_label = ImageLabel()
+
+        self.t2_stack.addWidget(scroll)
+        self.t2_stack.addWidget(self.t2_vid_label)
+        layout.addWidget(self.t2_stack, 1)
+
+        return root
+
+    # ---------- TAB 3 ----------
+    def _build_tab3(self):
+        root = QWidget()
+        layout = QVBoxLayout(root)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        btns = QHBoxLayout()
+        btn_clean = self.make_button("Tải Ảnh Chuẩn (Clean)", "#00c6ff", "#0072ff")
+        btn_clean.clicked.connect(self._t3_open_clean)
+        btn_dam = self.make_button("Tải Ảnh Hỏng (Damaged)", "#EF4444", "#B91C1C")
+        btn_dam.clicked.connect(self._t3_open_dam)
+        btns.addWidget(btn_clean)
+        btns.addWidget(btn_dam)
+        btns.addStretch(1)
+        layout.addLayout(btns)
+
+        grid = QGridLayout()
+        grid.setSpacing(12)
+
+        f_clean, l_clean, self.t3_img_clean = self.make_box("Ảnh Chuẩn (Clean GT)")
+        f_dam, l_dam, self.t3_img_dam = self.make_box("Ảnh Hỏng (Damaged)")
+        f_neg, l_neg, self.t3_img_neg = self.make_box("Negative Transform")
+        f_log, l_log, self.t3_img_log = self.make_box("Log Transform")
+        f_gam, l_gam, self.t3_img_gam = self.make_box("Gamma Transform")
+        f_bit, l_bit, self.t3_img_bit = self.make_box("Bitplane Slicing")
+
+        self.t3_met_neg = self._metric_label()
+        self.t3_met_log = self._metric_label()
+        self.t3_met_gam = self._metric_label()
+        self.t3_met_bit = self._metric_label()
+        l_neg.addWidget(self.t3_met_neg)
+        l_log.addWidget(self.t3_met_log)
+
+        self.t3_gam_row, _, self.t3_gam_slider = self._make_slider_row(
+            "Gamma", 0.1, 5.0, 2.0, self._t3_run_gamma, "Gamma: {:.2f}")
+        l_gam.addWidget(self.t3_gam_row)
+        l_gam.addWidget(self.t3_met_gam)
+
+        self.t3_bit_row, _, self.t3_bit_slider = self._make_slider_row(
+            "Bit", 0, 7, 7, self._t3_run_bit, "Bit: {}", integer=True)
+        l_bit.addWidget(self.t3_bit_row)
+        l_bit.addWidget(self.t3_met_bit)
+
+        grid.addWidget(f_clean, 0, 0)
+        grid.addWidget(f_dam, 0, 1)
+        grid.addWidget(f_neg, 1, 0)
+        grid.addWidget(f_log, 1, 1)
+        grid.addWidget(f_gam, 2, 0)
+        grid.addWidget(f_bit, 2, 1)
+        grid.setRowStretch(0, 1)
+        grid.setRowStretch(1, 1)
+        grid.setRowStretch(2, 1)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        layout.addLayout(grid, 1)
+
+        return root
+
+    # ---------- LOGIC TAB 1 ----------
+    def _t1_open_orig(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Chọn ảnh cần xử lý", "", "Ảnh (*.png *.jpg *.jpeg)")
+        if not path:
             return
-            
-        f_type = self.filter_var_t2.get()
-        g_val = self.gamma_slider_t2.get()
-        b_val = int(self.bit_slider_t2.get())
-        
-        num_images = len(self.batch_filepaths)
-        preview_limit = min(num_images, 30) 
-        
-        self.preview_thread_id += 1
-        current_id = self.preview_thread_id
-
-        def process_and_display():
-            img_size = (450, 450)
-            
-            for index in range(preview_limit):
-                if self.preview_thread_id != current_id: break 
-                if index >= len(self.batch_image_widgets): break
-                
-                path = self.batch_filepaths[index]
-                img = cv2.imread(path)
-                if img is None: continue
-                p_img = self.apply_filter_to_img(img, f_type, g_val, b_val)
-                
-                if self.preview_thread_id == current_id:
-                    lbl_orig, lbl_proc = self.batch_image_widgets[index]
-                    if lbl_orig.winfo_exists() and lbl_proc.winfo_exists():
-                        self.after(0, self.display_cv_image, img, lbl_orig, img_size)
-                        self.after(0, self.display_cv_image, p_img, lbl_proc, img_size)
-
-        threading.Thread(target=process_and_display, daemon=True).start()
-
-    def select_batch_images(self):
-        filepaths = filedialog.askopenfilenames(title="Chọn danh sách ảnh cần xử lý (Batch)",
-                                                filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp")])
-        if not filepaths: 
+        img = cv2.imread(path)
+        if img is None:
+            self._err("Không đọc được ảnh!")
             return
-            
-        self.batch_filepaths = list(filepaths)
-        self.current_video_path = None
-        
-        self.btn_save_batch.configure(text="Lưu Ảnh Xử Lý")
-        self.btn_save_batch.pack(anchor="center", pady=(0, 0))
-        
-        if getattr(self, 'grid_container', None):
-            self.grid_container.destroy()
-            self.grid_container = None
-        if getattr(self, 'batch_header_frame', None):
-            self.batch_header_frame.destroy()
-            self.batch_header_frame = None
-            
-        self.lbl_batch_status.place_forget()
-        self.batch_image_widgets.clear()
+        self.t1_orig_cv = img
+        self.t1_img_orig.set_cv_image(img)
+        self._t1_apply()
 
-        num_images = len(self.batch_filepaths)
-        preview_limit = min(num_images, 30) 
+    def _t1_open_clean(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Chọn ảnh chuẩn (Clean)", "", "Ảnh (*.png *.jpg *.jpeg)")
+        if not path:
+            return
+        img = cv2.imread(path)
+        if img is None:
+            self._err("Không đọc được ảnh Clean!")
+            return
+        self.t1_clean_cv = img
+        self._info("Đã nạp ảnh Clean. Sẵn sàng tính PSNR/SSIM.")
+        self._t1_apply()
 
-        self.batch_header_frame = ctk.CTkFrame(self.batch_preview_frame, fg_color="transparent")
-        self.batch_header_frame.pack(side="top", fill="x", pady=(10, 0))
-        self.batch_header_frame.grid_columnconfigure(0, weight=1)
-        self.batch_header_frame.grid_columnconfigure(1, weight=1)
-        
-        ctk.CTkLabel(self.batch_header_frame, text="Ảnh Gốc (Trước)", font=("Arial", 16, "bold")).grid(row=0, column=0)
-        ctk.CTkLabel(self.batch_header_frame, text="Ảnh Xử Lý (Sau)", font=("Arial", 16, "bold")).grid(row=0, column=1)
+    def _t1_save(self):
+        if self.t1_proc_cv is None:
+            self._err("Không có ảnh kết quả để lưu!")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Lưu ảnh kết quả", "ket_qua.png", "Ảnh (*.png *.jpg)")
+        if not path:
+            return
+        cv2.imwrite(path, self.t1_proc_cv)
+        self._info(f"Đã lưu kết quả: {path}")
 
-        self.grid_container = ctk.CTkScrollableFrame(self.batch_preview_frame, fg_color="transparent")
-        self.grid_container.pack(expand=True, fill="both", padx=5, pady=5)
-        self.grid_container.grid_columnconfigure(0, weight=1)
-        self.grid_container.grid_columnconfigure(1, weight=1)
+    def _t1_filter_changed(self):
+        key = self.t1_filter_cb.currentData()
+        self.t1_gamma_row.setVisible(key == "gamma")
+        self.t1_bit_row.setVisible(key == "bitplane")
+        self._t1_apply()
 
-        for index in range(preview_limit):
-            path = self.batch_filepaths[index]
-            r = index
-            filename = os.path.basename(path)
-            
-            display_name_orig = filename if len(filename) <= 35 else filename[:35] + "..."
-            display_name_proc = f"processed_{filename}"
-            display_name_proc = display_name_proc if len(display_name_proc) <= 35 else display_name_proc[:35] + "..."
-            
-            frame_orig = ctk.CTkFrame(self.grid_container, fg_color="transparent")
-            frame_orig.grid(row=r, column=0, padx=15, pady=15, sticky="nsew")
-            lbl_orig = ctk.CTkLabel(frame_orig, text="Đang tải...", text_color="gray")
-            lbl_orig.pack(expand=True)
-            name_lbl_orig = ctk.CTkLabel(frame_orig, text=display_name_orig, font=("Arial", 12))
-            name_lbl_orig.pack(pady=(5,0))
-            
-            frame_proc = ctk.CTkFrame(self.grid_container, fg_color="transparent")
-            frame_proc.grid(row=r, column=1, padx=15, pady=15, sticky="nsew")
-            lbl_proc = ctk.CTkLabel(frame_proc, text="Đang xử lý...", text_color="gray")
-            lbl_proc.pack(expand=True)
-            name_lbl_proc = ctk.CTkLabel(frame_proc, text=display_name_proc, font=("Arial", 12))
-            name_lbl_proc.pack(pady=(5,0))
-            
-            self.batch_image_widgets.append((lbl_orig, lbl_proc))
-                
-        self.update_batch_preview()
+    def _t1_apply(self, *args):
+        if self.t1_orig_cv is None:
+            return
+        key = self.t1_filter_cb.currentData()
+        g = self.t1_gamma_slider.value() / 100.0
+        b = int(self.t1_bit_slider.value() / 100.0)
+        self.t1_proc_cv = self._apply_filter(self.t1_orig_cv, key, g, b)
+        self.t1_img_proc.set_cv_image(self.t1_proc_cv)
 
-    def run_save_batch(self):
-        if not self.batch_filepaths and not self.current_video_path:
-            messagebox.showwarning("Cảnh báo", "Vui lòng nạp ảnh hoặc video để lưu!")
+        if self.t1_clean_cv is not None and key in ("gamma", "bitplane"):
+            cln = cv2.resize(self.t1_clean_cv, self.t1_proc_cv.shape[:2][::-1])
+            self.t1_psnr_lbl.setText(f"PSNR: {metrics.calc_psnr(cln, self.t1_proc_cv):.2f}")
+            self.t1_ssim_lbl.setText(f"SSIM: {metrics.calc_ssim(cln, self.t1_proc_cv):.4f}")
+        else:
+            self.t1_psnr_lbl.setText("PSNR: --")
+            self.t1_ssim_lbl.setText("SSIM: --")
+
+    # ---------- LOGIC TAB 2 ----------
+    def _apply_filter(self, img, key, gamma, bit):
+        if key == "negative":
+            return filters.apply_negative(img)
+        if key == "log":
+            return filters.apply_log_transform(img)
+        if key == "gamma":
+            return filters.apply_gamma_transform(img, gamma=gamma)
+        if key == "bitplane":
+            return filters.apply_bit_plane_slicing(img, bit=bit)
+        return img.copy()
+
+    def _t2_open_batch(self):
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Chọn nhiều ảnh", "", "Ảnh (*.png *.jpg *.jpeg *.bmp)")
+        if not paths:
+            return
+        self._t2_stop_video()
+        self.t2_paths = paths
+        self.t2_video_path = None
+        self.t2_stack.setCurrentIndex(0)
+        self._t2_build_grid()
+
+    def _t2_build_grid(self):
+        while self.t2_grid_lay.count():
+            item = self.t2_grid_lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+        key = self.t2_filter_cb.currentData()
+        g = self.t2_gamma_slider.value() / 100.0
+        b = int(self.t2_bit_slider.value() / 100.0)
+
+        for path in self.t2_paths[:20]:
+            img = cv2.imread(path)
+            if img is None:
+                continue
+            proc = self._apply_filter(img, key, g, b)
+            row = QWidget()
+            rl = QHBoxLayout(row)
+            rl.setContentsMargins(0, 0, 0, 0)
+            rl.setSpacing(12)
+
+            for lbl_title, cv in (("Ảnh Gốc", img), ("Ảnh Xử Lý", proc)):
+                frame = QFrame()
+                frame.setObjectName("card")
+                fl = QVBoxLayout(frame)
+                fl.setContentsMargins(10, 8, 10, 8)
+                fl.addWidget(self._title_label(lbl_title))
+                lbl = ImageLabel()
+                lbl.set_cv_image(cv)
+                fl.addWidget(lbl)
+                rl.addWidget(frame, 1)
+
+            self.t2_grid_lay.insertWidget(self.t2_grid_lay.count() - 1, row)
+
+    def _t2_open_video(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Chọn video", "", "Video (*.mp4 *.avi *.mov)")
+        if not path:
+            return
+        self.t2_paths = []
+        self.t2_video_path = path
+        self.t2_stack.setCurrentIndex(1)
+        self._t2_start_video()
+
+    def _t2_start_video(self):
+        self._t2_stop_video()
+        self.t2_vid_cap = cv2.VideoCapture(self.t2_video_path)
+        if not self.t2_vid_cap.isOpened():
+            self._err("Không mở được video!")
+            return
+        self.t2_vid_timer.start(30)
+
+    def _t2_stop_video(self):
+        self.t2_vid_timer.stop()
+        if self.t2_vid_cap is not None:
+            self.t2_vid_cap.release()
+            self.t2_vid_cap = None
+
+    def _t2_video_step(self):
+        if self.t2_vid_cap is None:
+            return
+        ret, frame = self.t2_vid_cap.read()
+        if not ret:
+            self.t2_vid_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            return
+        key = self.t2_filter_cb.currentData()
+        g = self.t2_gamma_slider.value() / 100.0
+        b = int(self.t2_bit_slider.value() / 100.0)
+        proc = self._apply_filter(frame, key, g, b)
+        self.t2_vid_label.set_cv_image(proc)
+
+    def _t2_filter_changed(self):
+        key = self.t2_filter_cb.currentData()
+        self.t2_gamma_row.setVisible(key == "gamma")
+        self.t2_bit_row.setVisible(key == "bitplane")
+        self._t2_apply_preview()
+
+    def _t2_apply_preview(self, *args):
+        if self.t2_paths:
+            self._t2_build_grid()
+
+    def _t2_save(self):
+        if self.t2_video_path:
+            self._t2_save_video()
+        elif self.t2_paths:
+            self._t2_save_batch()
+
+    def _t2_save_batch(self):
+        folder = QFileDialog.getExistingDirectory(self, "Chọn thư mục lưu ảnh batch")
+        if not folder:
             return
 
-        f_type = self.filter_var_t2.get()
-        g_val = self.gamma_slider_t2.get()
-        b_val = int(self.bit_slider_t2.get())
-
-        if self.current_video_path:
-            out_path = filedialog.asksaveasfilename(
-                title="Lưu Video Xử Lý",
-                defaultextension=".mp4",
-                filetypes=[("MP4 file", "*.mp4"), ("AVI file", "*.avi")]
-            )
-            if not out_path: return
-
-            self.btn_save_batch.configure(state="disabled", text="Đang Render Video...")
-
-            def save_vid_task():
-                try:
-                    filters.save_processed_video(
-                        self.current_video_path, out_path, f_type, gamma=g_val, bit=b_val
-                    )
-                    self.after(0, lambda: messagebox.showinfo("Hoàn Tất", "Đã xuất và lưu video thành công!"))
-                except Exception as e:
-                    self.after(0, lambda: messagebox.showerror("Lỗi", f"Không thể lưu video: {e}"))
-                finally:
-                    self.after(0, lambda: self.btn_save_batch.configure(state="normal", text="💾 Lưu Video Xử Lý"))
-
-            threading.Thread(target=save_vid_task, daemon=True).start()
-
-        elif self.batch_filepaths:
-            out_dir = filedialog.askdirectory(title="Chọn thư mục để lưu ảnh đã xử lý")
-            if not out_dir: return
-
+        def work():
+            key = self.t2_filter_cb.currentData()
+            g = self.t2_gamma_slider.value() / 100.0
+            b = int(self.t2_bit_slider.value() / 100.0)
             count = 0
-            for path in self.batch_filepaths:
+            for path in self.t2_paths:
                 img = cv2.imread(path)
-                if img is None: continue
-                p_img = self.apply_filter_to_img(img, f_type, g_val, b_val)
-                filename = os.path.basename(path)
-                cv2.imwrite(os.path.join(out_dir, f"processed_{filename}"), p_img)
+                if img is None:
+                    continue
+                proc = self._apply_filter(img, key, g, b)
+                cv2.imwrite(os.path.join(folder, f"processed_{os.path.basename(path)}"), proc)
                 count += 1
-                
-            messagebox.showinfo("Hoàn Tất", f"Đã lưu thành công {count} ảnh!")
+            return count
 
-    def play_video(self):
-        if self.video_playing:
-            self.video_playing = False
-            self.btn_video.configure(text="Nạp Video")
+        self._run_in_thread(work, self._t2_batch_done)
+
+    def _t2_batch_done(self, status, result):
+        if status == "err":
+            self._err(f"Lỗi: {result}")
+        else:
+            self._info(f"Đã lưu thành công {result} ảnh!")
+
+    def _t2_save_video(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Lưu video đã xử lý", "video_xu_ly.mp4", "Video (*.mp4 *.avi)")
+        if not path:
             return
-            
-        filepath = filedialog.askopenfilename(filetypes=[("Video", "*.mp4 *.avi *.mkv")])
-        if not filepath: return
-        
-        self.batch_filepaths = []
-        self.current_video_path = filepath
-        
-        self.btn_save_batch.configure(text="Lưu Video Xử Lý")
-        self.btn_save_batch.pack(anchor="center", pady=(0,0))
-        
-        if getattr(self, 'grid_container', None):
-            self.grid_container.destroy()
-            self.grid_container = None
-        if getattr(self, 'batch_header_frame', None):
-            self.batch_header_frame.destroy()
-            self.batch_header_frame = None
-            
-        self.lbl_batch_status.place(relx=0.5, rely=0.5, anchor="center")
-        
-        self.video_playing = True
-        self.btn_video.configure(text="Dừng phát Video")
-        self.lbl_batch_status.configure(text="Đang chuẩn bị Video...", image="")
-        
-        def video_thread():
-            cap = cv2.VideoCapture(self.current_video_path)
+        self._info("Hệ thống đang Render Video... Vui lòng đợi!")
+
+        def work():
+            filters.save_processed_video(
+                self.t2_video_path, path, self.t2_filter_cb.currentData(),
+                gamma=self.t2_gamma_slider.value() / 100.0,
+                bit=int(self.t2_bit_slider.value() / 100.0),
+            )
+            return path
+
+        self._run_in_thread(work, self._t2_video_done)
+
+    def _t2_video_done(self, status, result):
+        self._t2_stop_video()
+        if status == "err":
+            self._err(f"Lỗi khi lưu video: {result}")
+        else:
+            self._info(f"Đã xuất và lưu video: {result}")
+
+    # ---------- LOGIC TAB 3 ----------
+    def _t3_open_clean(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Chọn ảnh chuẩn (Clean)", "", "Ảnh (*.png *.jpg *.jpeg *.bmp)")
+        if not path:
+            return
+        img = cv2.imread(path)
+        if img is None:
+            self._err("Không đọc được ảnh Clean!")
+            return
+        self.t3_clean_cv = img
+        self.t3_img_clean.set_cv_image(img)
+        if self.t3_dam_cv is not None:
+            self.t3_dam_cv = cv2.resize(self.t3_dam_cv, img.shape[:2][::-1])
+            self.t3_img_dam.set_cv_image(self.t3_dam_cv)
+        self._t3_run_all()
+
+    def _t3_open_dam(self):
+        if self.t3_clean_cv is None:
+            self._err("Vui lòng tải Ảnh Chuẩn (Clean) trước!")
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Chọn ảnh hỏng (Damaged)", "", "Ảnh (*.png *.jpg *.jpeg *.bmp)")
+        if not path:
+            return
+        img = cv2.imread(path)
+        if img is None:
+            self._err("Không đọc được ảnh Hỏng!")
+            return
+        self.t3_dam_cv = cv2.resize(img, self.t3_clean_cv.shape[:2][::-1])
+        self.t3_img_dam.set_cv_image(self.t3_dam_cv)
+        self._t3_run_all()
+
+    def _t3_set_metric(self, proc, lbl):
+        if self.t3_clean_cv is None or proc is None:
+            return
+        psnr = metrics.calc_psnr(self.t3_clean_cv, proc)
+        ssim = metrics.calc_ssim(self.t3_clean_cv, proc)
+        lbl.setText(f"PSNR: {psnr:.2f} | SSIM: {ssim:.4f}")
+
+    def _t3_run_all(self):
+        if self.t3_dam_cv is None:
+            return
+        neg = filters.apply_negative(self.t3_dam_cv)
+        self.t3_img_neg.set_cv_image(neg)
+        self._t3_set_metric(neg, self.t3_met_neg)
+
+        log = filters.apply_log_transform(self.t3_dam_cv)
+        self.t3_img_log.set_cv_image(log)
+        self._t3_set_metric(log, self.t3_met_log)
+
+        self._t3_run_gamma()
+        self._t3_run_bit()
+
+    def _t3_run_gamma(self, *args):
+        if self.t3_dam_cv is None:
+            return
+        gam = filters.apply_gamma_transform(self.t3_dam_cv, gamma=self.t3_gam_slider.value() / 100.0)
+        self.t3_img_gam.set_cv_image(gam)
+        self._t3_set_metric(gam, self.t3_met_gam)
+
+    def _t3_run_bit(self, *args):
+        if self.t3_dam_cv is None:
+            return
+        bit = filters.apply_bit_plane_slicing(self.t3_dam_cv, bit=int(self.t3_bit_slider.value() / 100.0))
+        self.t3_img_bit.set_cv_image(bit)
+        self._t3_set_metric(bit, self.t3_met_bit)
+
+    # ---------- TIỆN ÍCH CHUNG ----------
+    def _run_in_thread(self, fn, on_done):
+        sig = ThreadDone()
+        if on_done:
+            sig.finished.connect(on_done)
+
+        def wrapper():
             try:
-                while self.video_playing and cap.isOpened():
-                    ret, frame = cap.read()
-                    if not ret: 
-                        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                        continue
-                    
-                    f_type = self.filter_var_t2.get()
-                    g_val = self.gamma_slider_t2.get()
-                    b_val = int(self.bit_slider_t2.get())
-                    
-                    p_frame = self.apply_filter_to_img(frame, f_type, g_val, b_val)
-                    self.after(0, self.display_cv_image, p_frame, self.lbl_batch_status, (900, 600))
-                    cv2.waitKey(33) 
-            except Exception as e: 
-                print(f"Lỗi Video: {e}")
-            finally:
-                if cap: cap.release()
-                self.video_playing = False
-                self.after(0, lambda: self.btn_video.configure(text="Nạp Video"))
-                
-        threading.Thread(target=video_thread, daemon=True).start()
+                sig.finished.emit("ok", fn())
+            except Exception as ex:
+                sig.finished.emit("err", str(ex))
 
-    # ==========================================
-    # TAB 3: SO SÁNH PHƯƠNG PHÁP
-    # ==========================================
-    def setup_compare_tab(self):
-        top_frame = ctk.CTkFrame(self.tab_compare, fg_color="transparent")
-        top_frame.pack(fill="x", pady=10)
-        
-        ctk.CTkButton(top_frame, text="Tải Ảnh Chuẩn (Clean)", width=200, height=40, font=("Arial", 14, "bold"),
-                      command=self.load_clean_img).pack(side="left", expand=True)
-                      
-        self.btn_load_damaged = ctk.CTkButton(top_frame, text="Tải Ảnh Hỏng (Damaged)", width=200, height=40, font=("Arial", 14, "bold"),
-                      fg_color="#A33535", hover_color="#7A2424", command=self.load_damaged_img, state="disabled")
-        self.btn_load_damaged.pack(side="right", expand=True)
+        threading.Thread(target=wrapper, daemon=True).start()
 
-        scroll_frame = ctk.CTkScrollableFrame(self.tab_compare)
-        scroll_frame.pack(expand=True, fill="both", padx=10, pady=10)
-        
-        row1 = ctk.CTkFrame(scroll_frame, fg_color="transparent")
-        row1.pack(fill="x", pady=10)
-        self.lbl_comp_clean, _ = self.create_compare_cell(row1, "Ảnh Chuẩn (Clean GT)", has_metrics=False)
-        self.lbl_comp_dam, _ = self.create_compare_cell(row1, "Ảnh Hỏng (Damaged)", has_metrics=False)
+    def _info(self, msg):
+        QMessageBox.information(self, "Thông báo", msg)
 
-        row2 = ctk.CTkFrame(scroll_frame, fg_color="transparent")
-        row2.pack(fill="x", pady=10)
-        self.lbl_comp_neg, self.met_neg = self.create_compare_cell(row2, "Negative Transform")
-        self.lbl_comp_log, self.met_log = self.create_compare_cell(row2, "Log Transform")
+    def _err(self, msg):
+        QMessageBox.warning(self, "Lỗi", msg)
 
-        row3 = ctk.CTkFrame(scroll_frame, fg_color="transparent")
-        row3.pack(fill="x", pady=10)
-        
-        self.lbl_comp_gam, self.met_gam, self.slide_gam, self.lbl_val_gam = self.create_compare_cell(
-            row3, "Gamma Transform", has_slider=True, s_from=0.1, s_to=5.0, s_val=2.0, cmd=self.on_tab3_gamma, label_prefix="Chỉnh Gamma:")
-        
-        self.lbl_comp_bit, self.met_bit, self.slide_bit, self.lbl_val_bit = self.create_compare_cell(
-            row3, "Bitplane Slicing", has_slider=True, s_from=0, s_to=7, s_val=7, cmd=self.on_tab3_bit, is_int=True, label_prefix="Chỉnh Bit (0-7):")
+    def closeEvent(self, event):
+        self._t2_stop_video()
+        super().closeEvent(event)
 
-    def create_compare_cell(self, parent, title, has_slider=False, has_metrics=True, s_from=0, s_to=1, s_val=0, cmd=None, is_int=False, label_prefix=""):
-        cell = ctk.CTkFrame(parent, fg_color="transparent")
-        cell.pack(side="left", expand=True, fill="both", padx=10)
-        
-        ctk.CTkLabel(cell, text=title, font=("Arial", 15, "bold")).pack(pady=5)
-        
-        img_container = ctk.CTkFrame(cell, corner_radius=8, fg_color="#1E1E1E", border_width=1, border_color="#3A3A3A")
-        img_container.pack(expand=True, fill="both")
-        lbl_img = ctk.CTkLabel(img_container, text="Chưa tải", text_color="gray")
-        lbl_img.pack(expand=True, pady=20)
-        
-        slider = None
-        val_lbl = None
-        if has_slider:
-            val_lbl = ctk.CTkLabel(cell, text=f"{label_prefix} {s_val:.2f}" if not is_int else f"{label_prefix} {s_val}", font=("Arial", 13, "bold"), text_color="#5CE1E6")
-            val_lbl.pack(pady=(10, 0))
-            slider = ctk.CTkSlider(cell, from_=s_from, to=s_to, command=cmd)
-            slider.set(s_val)
-            if is_int: slider.configure(number_of_steps=s_to)
-            slider.pack(pady=(0, 10), fill="x", padx=20)
 
-        met_lbl = None
-        if has_metrics:
-            met_lbl = ctk.CTkLabel(cell, text="PSNR: -- | SSIM: --", text_color="#5CE1E6", font=("Arial", 13, "bold"))
-            met_lbl.pack(pady=5)
-            
-        if has_slider:
-            return lbl_img, met_lbl, slider, val_lbl
-        else:
-            return lbl_img, met_lbl
+def main():
+    app = QApplication(sys.argv)
+    app.setStyle("Fusion")
+    win = ImageApp()
+    win.show()
+    sys.exit(app.exec())
 
-    def load_clean_img(self):
-        filepath = filedialog.askopenfilename(filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp")])
-        if filepath:
-            self.clean_image = cv2.imread(filepath)
-            self.btn_load_damaged.configure(state="normal") 
-            
-            if self.damaged_image is not None:
-                h, w = self.clean_image.shape[:2]
-                self.damaged_image = cv2.resize(self.damaged_image, (w, h))
-                self.display_cv_image(self.damaged_image, self.lbl_comp_dam, size=(320, 320))
-                
-            self.display_cv_image(self.clean_image, self.lbl_comp_clean, size=(320, 320))
-            self.process_all_compare()
-
-    def load_damaged_img(self):
-        if self.clean_image is None:
-            messagebox.showwarning("Cảnh báo", "Vui lòng Tải Ảnh Chuẩn (Clean) trước!")
-            return
-            
-        filepath = filedialog.askopenfilename(filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp")])
-        if filepath:
-            self.damaged_image = cv2.imread(filepath)
-            
-            if self.clean_image is not None:
-                h, w = self.clean_image.shape[:2]
-                self.damaged_image = cv2.resize(self.damaged_image, (w, h))
-                
-            self.display_cv_image(self.damaged_image, self.lbl_comp_dam, size=(320, 320))
-            self.process_all_compare()
-
-    def update_metrics(self, processed_img, label_widget):
-        if self.clean_image is None or processed_img is None:
-            label_widget.configure(text="Thiếu ảnh Clean")
-            return
-        try:
-            psnr = metrics.calc_psnr(self.clean_image, processed_img)
-            ssim = metrics.calc_ssim(self.clean_image, processed_img)
-            label_widget.configure(text=f"PSNR: {psnr:.2f} | SSIM: {ssim:.4f}")
-        except Exception as e:
-            label_widget.configure(text="Lỗi kích thước ảnh")
-
-    def process_all_compare(self):
-        if self.damaged_image is None: return
-        
-        neg_img = filters.apply_negative(self.damaged_image)
-        self.display_cv_image(neg_img, self.lbl_comp_neg, size=(320, 320))
-        self.update_metrics(neg_img, self.met_neg)
-
-        log_img = filters.apply_log_transform(self.damaged_image)
-        self.display_cv_image(log_img, self.lbl_comp_log, size=(320, 320))
-        self.update_metrics(log_img, self.met_log)
-
-        self.on_tab3_gamma() 
-        self.on_tab3_bit()
-
-    def on_tab3_gamma(self, value=None):
-        if value is not None:
-            self.lbl_val_gam.configure(text=f"Chỉnh Gamma: {float(value):.2f}")
-        else:
-            self.lbl_val_gam.configure(text=f"Chỉnh Gamma: {self.slide_gam.get():.2f}")
-            
-        if self.damaged_image is None: return
-        
-        if self.tab3_gamma_job: self.after_cancel(self.tab3_gamma_job)
-        
-        def do_gamma():
-            g_img = filters.apply_gamma_transform(self.damaged_image, gamma=self.slide_gam.get())
-            self.display_cv_image(g_img, self.lbl_comp_gam, size=(320, 320))
-            self.update_metrics(g_img, self.met_gam)
-            
-        self.tab3_gamma_job = self.after(150, do_gamma)
-
-    def on_tab3_bit(self, value=None):
-        if value is not None:
-            self.lbl_val_bit.configure(text=f"Chỉnh Bit (0-7): {int(float(value))}")
-        else:
-            self.lbl_val_bit.configure(text=f"Chỉnh Bit (0-7): {int(self.slide_bit.get())}")
-            
-        if self.damaged_image is None: return
-        
-        if self.tab3_bit_job: self.after_cancel(self.tab3_bit_job)
-        
-        def do_bit():
-            b_img = filters.apply_bit_plane_slicing(self.damaged_image, bit=int(self.slide_bit.get()))
-            self.display_cv_image(b_img, self.lbl_comp_bit, size=(320, 320))
-            self.update_metrics(b_img, self.met_bit)
-            
-        self.tab3_bit_job = self.after(150, do_bit)
-
-    # HÀM HỖ TRỢ HIỂN THỊ
-    def display_cv_image(self, cv_img, label_widget, size=(500, 500)):
-        if cv_img is None: return
-        
-        h, w = cv_img.shape[:2]
-        max_w, max_h = size
-        
-        ratio = min(max_w / w, max_h / h)
-        new_w = max(1, int(w * ratio))
-        new_h = max(1, int(h * ratio))
-        
-        resized_img = cv2.resize(cv_img, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
-        rgb_image = cv2.cvtColor(resized_img, cv2.COLOR_BGR2RGB)
-        pil_img = Image.fromarray(rgb_image)
-        
-        ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(new_w, new_h))
-        label_widget.configure(image=ctk_img, text="")
-        label_widget.image = ctk_img 
 
 if __name__ == "__main__":
-    app = ImageProcessingApp()
-    app.mainloop()
+    main()
