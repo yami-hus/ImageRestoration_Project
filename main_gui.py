@@ -84,9 +84,6 @@ class ImageApp(QMainWindow):
         self.t2_vid_timer = QTimer(self)
         self.t2_vid_timer.timeout.connect(self._t2_video_step)
 
-        self.t3_clean_cv = None
-        self.t3_dam_cv = None
-
         # Timer chống giật lag khi kéo chuột
         self.t1_debounce_timer = QTimer(self)
         self.t1_debounce_timer.setSingleShot(True)
@@ -95,14 +92,6 @@ class ImageApp(QMainWindow):
         self.t2_debounce_timer = QTimer(self)
         self.t2_debounce_timer.setSingleShot(True)
         self.t2_debounce_timer.timeout.connect(self._t2_apply_preview_heavy)
-
-        self.t3_gam_timer = QTimer(self)
-        self.t3_gam_timer.setSingleShot(True)
-        self.t3_gam_timer.timeout.connect(self._t3_run_gamma_heavy)
-
-        self.t3_bit_timer = QTimer(self)
-        self.t3_bit_timer.setSingleShot(True)
-        self.t3_bit_timer.timeout.connect(self._t3_run_bit_heavy)
 
         self._build_ui()
 
@@ -268,7 +257,6 @@ class ImageApp(QMainWindow):
         tabs = QTabWidget()
         tabs.addTab(self._build_tab1(), "PSNR & SSIM (Đơn Ảnh)")
         tabs.addTab(self._build_tab2(), "Batch Processing & Video")
-        tabs.addTab(self._build_tab3(), "So sánh phương pháp")
         self.setCentralWidget(tabs)
 
     # ---------- TAB 1 ----------
@@ -420,71 +408,6 @@ class ImageApp(QMainWindow):
         self.t2_stack.addWidget(scroll)
         self.t2_stack.addWidget(self.t2_vid_label)
         layout.addWidget(self.t2_stack, 1)
-
-        return root
-
-    # ---------- TAB 3 ----------
-    def _build_tab3(self):
-        root = QWidget()
-        layout = QVBoxLayout(root)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
-
-        btns = QHBoxLayout()
-        btn_clean = self.make_button("Tải Ảnh Chuẩn (Clean)", "#00c6ff", "#0072ff")
-        btn_clean.clicked.connect(self._t3_open_clean)
-        
-        self.btn_t3_dam = self.make_button("Tải Ảnh Hỏng (Damaged)", "#EF4444", "#B91C1C")
-        self.btn_t3_dam.clicked.connect(self._t3_open_dam)
-        self.btn_t3_dam.setEnabled(False) 
-
-        btns.addWidget(btn_clean)
-        btns.addWidget(self.btn_t3_dam)
-        btns.addStretch(1)
-        layout.addLayout(btns)
-
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        
-        container_widget = QWidget()
-        grid = QGridLayout(container_widget)
-        grid.setSpacing(15)
-        grid.setContentsMargins(5, 5, 20, 5) 
-
-        f_clean, l_clean, self.t3_img_clean = self.make_box("Ảnh Chuẩn (Clean GT)", fixed_h=380)
-        f_dam, l_dam, self.t3_img_dam = self.make_box("Ảnh Hỏng (Damaged)", fixed_h=380)
-        f_neg, l_neg, self.t3_img_neg = self.make_box("Negative Transform", fixed_h=380)
-        f_log, l_log, self.t3_img_log = self.make_box("Log Transform", fixed_h=380)
-        f_gam, l_gam, self.t3_img_gam = self.make_box("Gamma Transform", fixed_h=380)
-        f_bit, l_bit, self.t3_img_bit = self.make_box("Bitplane Slicing", fixed_h=380)
-
-        self.t3_met_neg = self._metric_label()
-        self.t3_met_log = self._metric_label()
-        self.t3_met_gam = self._metric_label()
-        self.t3_met_bit = self._metric_label()
-        
-        l_neg.addWidget(self.t3_met_neg)
-        l_log.addWidget(self.t3_met_log)
-
-        self.t3_gam_row, _, self.t3_gam_slider = self._make_slider_row(
-            "Gamma", 0.1, 5.0, 2.0, self._t3_run_gamma, "Gamma: {:.2f}")
-        l_gam.addWidget(self.t3_gam_row)
-        l_gam.addWidget(self.t3_met_gam)
-
-        self.t3_bit_row, _, self.t3_bit_slider = self._make_slider_row(
-            "Bit", 0, 7, 7, self._t3_run_bit, "Bit: {}", integer=True)
-        l_bit.addWidget(self.t3_bit_row)
-        l_bit.addWidget(self.t3_met_bit)
-
-        grid.addWidget(f_clean, 0, 0)
-        grid.addWidget(f_dam, 0, 1)
-        grid.addWidget(f_neg, 1, 0)
-        grid.addWidget(f_log, 1, 1)
-        grid.addWidget(f_gam, 2, 0)
-        grid.addWidget(f_bit, 2, 1)
-
-        scroll_area.setWidget(container_widget)
-        layout.addWidget(scroll_area, 1)
 
         return root
 
@@ -734,82 +657,6 @@ class ImageApp(QMainWindow):
             self._err(f"Lỗi khi lưu video: {result}")
         else:
             self._info(f"Đã xuất và lưu video: {result}")
-
-    # ---------- LOGIC TAB 3 ----------
-    def _t3_open_clean(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Chọn ảnh chuẩn (Clean)", "", "Ảnh (*.png *.jpg *.jpeg *.bmp)")
-        if not path:
-            return
-        img = cv2.imread(path)
-        if img is None:
-            self._err("Không đọc được ảnh Clean!")
-            return
-        self.t3_clean_cv = img
-        self.t3_img_clean.set_cv_image(img)
-        self.btn_t3_dam.setEnabled(True) 
-
-        if self.t3_dam_cv is not None:
-            self.t3_dam_cv = cv2.resize(self.t3_dam_cv, img.shape[:2][::-1])
-            self.t3_img_dam.set_cv_image(self.t3_dam_cv)
-        self._t3_run_all()
-
-    def _t3_open_dam(self):
-        if self.t3_clean_cv is None:
-            self._err("Vui lòng tải Ảnh Chuẩn (Clean) trước!")
-            return
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Chọn ảnh hỏng (Damaged)", "", "Ảnh (*.png *.jpg *.jpeg *.bmp)")
-        if not path:
-            return
-        img = cv2.imread(path)
-        if img is None:
-            self._err("Không đọc được ảnh Hỏng!")
-            return
-        self.t3_dam_cv = cv2.resize(img, self.t3_clean_cv.shape[:2][::-1])
-        self.t3_img_dam.set_cv_image(self.t3_dam_cv)
-        self._t3_run_all()
-
-    def _t3_set_metric(self, proc, lbl):
-        if self.t3_clean_cv is None or proc is None:
-            return
-        psnr = metrics.calc_psnr(self.t3_clean_cv, proc)
-        ssim = metrics.calc_ssim(self.t3_clean_cv, proc)
-        lbl.setText(f"PSNR: {psnr:.2f} | SSIM: {ssim:.4f}")
-
-    def _t3_run_all(self):
-        if self.t3_dam_cv is None:
-            return
-        neg = filters.apply_negative(self.t3_dam_cv)
-        self.t3_img_neg.set_cv_image(neg)
-        self._t3_set_metric(neg, self.t3_met_neg)
-
-        log = filters.apply_log_transform(self.t3_dam_cv)
-        self.t3_img_log.set_cv_image(log)
-        self._t3_set_metric(log, self.t3_met_log)
-
-        self._t3_run_gamma_heavy()
-        self._t3_run_bit_heavy()
-
-    def _t3_run_gamma(self, *args):
-        self.t3_gam_timer.start(150) 
-
-    def _t3_run_gamma_heavy(self):
-        if self.t3_dam_cv is None:
-            return
-        gam = filters.apply_gamma_transform(self.t3_dam_cv, gamma=self.t3_gam_slider.value() / 100.0)
-        self.t3_img_gam.set_cv_image(gam)
-        self._t3_set_metric(gam, self.t3_met_gam)
-
-    def _t3_run_bit(self, *args):
-        self.t3_bit_timer.start(150) 
-
-    def _t3_run_bit_heavy(self):
-        if self.t3_dam_cv is None:
-            return
-        bit = filters.apply_bit_plane_slicing(self.t3_dam_cv, bit=int(self.t3_bit_slider.value()))
-        self.t3_img_bit.set_cv_image(bit)
-        self._t3_set_metric(bit, self.t3_met_bit)
 
     # ---------- TIỆN ÍCH CHUNG ----------
     def _run_in_thread(self, fn, on_done):
